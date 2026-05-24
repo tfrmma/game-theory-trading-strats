@@ -25,7 +25,7 @@ Tested on Hyperliquid; adaptable to Binance Perps, dYdX, and similar venues.
 # Simulation
 python runner.py
 
-# Live (real money)
+# Live
 python runner.py --live --coin BTC
 
 # Testnet
