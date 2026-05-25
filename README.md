@@ -143,3 +143,5 @@ All strategies track: spread capture, inventory PnL, adverse selection cost, and
 - Spoofing detection is a counter-strategy tool, not a spoofing implementation.
 - Calibrate all rolling windows, thresholds, and `size_decimals` to your venue before going live.
 - The Cython extension is optional. All hot paths have a pure Python fallback that runs automatically.
+
+Rest in Peace Toto, this is in your honor.
