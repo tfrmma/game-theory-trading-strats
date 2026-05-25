@@ -53,7 +53,7 @@ python setup_hot_paths.py build_ext --inplace
 # Simulation
 python runner.py
 
-# Live (real money)
+# Live
 python runner.py --live --coin BTC
 
 # Testnet
