@@ -19,6 +19,12 @@ wheels/
 .installed.cfg
 *.egg
 
+*.so
+*.pyd
+*.c
+build/
+_hot_paths.*.html
+
 .venv/
 venv/
 env/
