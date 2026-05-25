@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, List, Optional
@@ -47,6 +48,19 @@ class VPINCalculator:
         self._current_bucket = VPINBucket()
         self._completed_buckets: Deque[VPINBucket] = deque(maxlen=n_buckets)
         self._remaining: float = bucket_size
+
+    def resize_bucket(self, new_size: float, resize_threshold: float = 0.20) -> bool:
+        """
+        Resize bucket_size when ADV-derived target deviates by more than threshold.
+        Resets the current partial bucket to avoid a corrupted imbalance reading.
+        Returns True if a resize actually happened.
+        """
+        if abs(new_size - self.bucket_size) / max(self.bucket_size, 1e-9) > resize_threshold:
+            self.bucket_size      = new_size
+            self._current_bucket  = VPINBucket()
+            self._remaining       = new_size
+            return True
+        return False
 
     def update(self, trades: List[Trade]) -> Optional[float]:
         for trade in trades:
@@ -139,6 +153,63 @@ class KyleLambdaEstimator:
         return self.lambda_estimate * abs(expected_ofi)
 
 
+
+class RollingADV:
+    """
+    Rolling Average Daily Volume over a configurable window.
+
+    Maintains a timestamped deque of per-tick volumes and exposes the total
+    volume observed in the last `window_h` hours. VPINCalculator uses this
+    to resize buckets so that a fixed number of buckets spans the observed
+    flow regardless of how quiet or hectic the market is.
+
+    Bucket sizing:
+        bucket_size = adv * adv_fraction
+    where adv_fraction = 1 / n_buckets_per_adv_window, e.g. 1/50 means
+    each bucket represents 2% of the rolling daily volume.
+
+    If less than `min_obs` ticks have been seen, returns the provided
+    fallback so VPIN can still run during the warm-up period.
+    """
+
+    def __init__(
+        self,
+        window_h: float = 24.0,
+        n_buckets_per_window: int = 50,
+        min_obs: int = 20,
+        fallback_bucket_size: float = 100.0,
+    ) -> None:
+        self.window_s             = window_h * 3600.0
+        self.n_buckets_per_window = n_buckets_per_window
+        self.min_obs              = min_obs
+        self.fallback_bucket_size = fallback_bucket_size
+
+        self._vol_history: Deque[tuple] = deque()   # (timestamp, volume)
+
+    def update(self, trades: List[Trade]) -> float:
+        """Ingest new trades and return the current recommended bucket_size."""
+        tick_vol = sum(t.size for t in trades)
+        now      = time.time()
+        self._vol_history.append((now, tick_vol))
+        self._expire_old(now)
+        return self.bucket_size
+
+    def _expire_old(self, now: float) -> None:
+        cutoff = now - self.window_s
+        while self._vol_history and self._vol_history[0][0] < cutoff:
+            self._vol_history.popleft()
+
+    @property
+    def rolling_volume(self) -> float:
+        return sum(v for _, v in self._vol_history)
+
+    @property
+    def bucket_size(self) -> float:
+        if len(self._vol_history) < self.min_obs:
+            return self.fallback_bucket_size
+        return max(self.fallback_bucket_size * 0.1, self.rolling_volume / self.n_buckets_per_window)
+
+
 class FlowToxicityClassifier:
     """
     Composite real-time toxicity: VPIN (60%) + Kyle's λ (40%).
@@ -150,7 +221,13 @@ class FlowToxicityClassifier:
         vpin_toxic_threshold: float = 0.45,
         lambda_toxic_threshold: float = 0.05,
         cvd_momentum_threshold: float = 500.0,
+        adv_window_h: float = 24.0,
+        adv_buckets_per_window: int = 50,
     ) -> None:
+        self.adv_tracker = RollingADV(
+            window_h=adv_window_h,
+            n_buckets_per_window=adv_buckets_per_window,
+        )
         self.vpin_calc   = VPINCalculator()
         self.lambda_est  = KyleLambdaEstimator()
         self.vpin_toxic_threshold   = vpin_toxic_threshold
@@ -162,6 +239,12 @@ class FlowToxicityClassifier:
         self._ofi_window: Deque[float] = deque(maxlen=20)
 
     def update(self, book: OrderBook, trades: List[Trade]) -> dict:
+        # Recompute bucket_size from rolling ADV before filling buckets
+        target_bucket_size = self.adv_tracker.update(trades)
+        resized = self.vpin_calc.resize_bucket(target_bucket_size)
+        if resized:
+            logger.debug("VPIN bucket resized → %.2f (ADV-derived)", target_bucket_size)
+
         vpin = self.vpin_calc.update(trades)
 
         ofi = sum(t.signed_size for t in trades)
@@ -202,6 +285,8 @@ class FlowToxicityClassifier:
             "regime":             regime,
             "directional_signal": directional,
             "cumulative_ofi":     self._cumulative_ofi,
+            "bucket_size":        self.vpin_calc.bucket_size,
+            "adv":                self.adv_tracker.rolling_volume,
         }
 
 
@@ -236,7 +321,8 @@ def simulate_informed_flow(
                 print(
                     f"  tick={tick:3d} | vpin={state['vpin'] or 0:.3f} | "
                     f"λ={state['lambda']:.5f} | toxicity={state['toxicity_score']:.2f} | "
-                    f"regime={state['regime']:<18s} | spread_mult={state['spread_multiplier']:.1f}x"
+                    f"regime={state['regime']:<18s} | spread_mult={state['spread_multiplier']:.1f}x | "
+                    f"bucket={state['bucket_size']:.2f} adv={state['adv']:.1f}"
                     + signal_str
                 )
 
