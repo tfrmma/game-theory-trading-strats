@@ -10,10 +10,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 import numpy as np
 
 from init import (
-    BookLevel, OrderBook, Trade, Side, Signal, SignalStrength,
-    InventoryState, ExecutionOrder, OrderType,
-    simulate_order_book, simulate_trade_tape,
-    compute_realized_volatility,
+    OrderBook, Trade, Side, ExecutionOrder, OrderType,
+    InventoryState, simulate_order_book, simulate_trade_tape, compute_realized_volatility,
 )
 from info_asymmetry import FlowToxicityClassifier
 
@@ -22,7 +20,6 @@ logger = logging.getLogger(__name__)
 
 @dataclass
 class GuerrillaQuote:
-    """Single posted limit order with metadata for cancellation tracking."""
     side: Side
     price: float
     size: float
@@ -33,7 +30,13 @@ class GuerrillaQuote:
 
 
 class AvellanedaStoikovModel:
-    """Avellaneda-Stoikov reservation price and optimal spread model."""
+    """
+    AS reservation price and optimal spread with decaying risk horizon.
+
+    T is the total liquidation window. As the epoch elapses, remaining_t = T - (now - epoch_start)
+    shrinks toward zero, which tightens the reservation price skew and widens the spread —
+    forcing aggressive inventory unwind as the window closes.
+    """
 
     def __init__(
         self,
@@ -42,24 +45,39 @@ class AvellanedaStoikovModel:
         sigma: float = 0.0008,
         time_to_liquidation_s: float = 300.0,
     ) -> None:
-        self.gamma = gamma
-        self.k = k
-        self.sigma = sigma
-        self.T = time_to_liquidation_s
+        self.gamma        = gamma
+        self.k            = k
+        self.sigma        = sigma
+        self.T            = time_to_liquidation_s
+        self._epoch_start = time.time()
+
+    @property
+    def remaining_t(self) -> float:
+        """T - t: seconds left in the current liquidation window. Floored at 1s to avoid zero."""
+        elapsed = time.time() - self._epoch_start
+        return max(1.0, self.T - elapsed)
+
+    def reset_epoch(self) -> None:
+        """Call at the start of a new trading session or after a full inventory unwind."""
+        self._epoch_start = time.time()
 
     def reservation_price(self, mid: float, inventory: float) -> float:
-        skew = self.gamma * inventory * mid
-        return mid - skew - (self.gamma / 2) * (self.sigma ** 2) * self.T
+        t = self.remaining_t
+        return mid - self.gamma * inventory * mid - (self.gamma / 2) * (self.sigma ** 2) * t
 
     def optimal_spread(self) -> float:
-        return self.gamma * self.sigma**2 * self.T + (2 / self.gamma) * np.log(1 + self.gamma / self.k)
+        t = self.remaining_t
+        return self.gamma * self.sigma ** 2 * t + (2 / self.gamma) * np.log(1 + self.gamma / self.k)
 
     def update_volatility(self, new_sigma: float) -> None:
         self.sigma = new_sigma
 
 
 class AdaptiveGuerrillaStrategy:
-    """Avellaneda-Stoikov market making with aggressive toxic flow cancellation."""
+    """
+    Avellaneda-Stoikov market making with fast toxic-flow cancellation.
+    Quotes two-sided, skewed by inventory. Cancels immediately when OFI turns against us.
+    """
 
     def __init__(
         self,
@@ -67,99 +85,67 @@ class AdaptiveGuerrillaStrategy:
         base_size_usd: float = 8000.0,
         toxicity_cancel_threshold: float = 0.55,
     ) -> None:
-        self.max_inventory = max_inventory
-        self.base_size_usd = base_size_usd
+        self.max_inventory             = max_inventory
+        self.base_size_usd             = base_size_usd
         self.toxicity_cancel_threshold = toxicity_cancel_threshold
 
-        self.inventory = InventoryState()
-        self.as_model = AvellanedaStoikovModel()
-        self.toxicity = FlowToxicityClassifier()
+        self.inventory   = InventoryState()
+        self.as_model    = AvellanedaStoikovModel()
+        self.toxicity    = FlowToxicityClassifier()
 
         self._active_quotes: Dict[str, GuerrillaQuote] = {}
         self._cancel_log: List[dict] = []
         self._mid_history: Deque[float] = deque(maxlen=100)
 
-    def update(
-        self,
-        book: OrderBook,
-        trades: List[Trade],
-    ) -> Tuple[List[ExecutionOrder], List[str]]:
+    def update(self, book: OrderBook, trades: List[Trade]) -> Tuple[List[ExecutionOrder], List[str]]:
         self._mid_history.append(book.mid)
-
         toxicity_state = self.toxicity.update(book, trades)
 
         if len(self._mid_history) >= 20:
-            prices = np.array(self._mid_history)
-            self.as_model.update_volatility(compute_realized_volatility(prices))
+            self.as_model.update_volatility(compute_realized_volatility(np.array(self._mid_history)))
 
         self._simulate_passive_fills(book, trades)
 
-        actions: List[ExecutionOrder] = []
-        cancels: List[str] = []
+        cancels = self._cancel_toxic_quotes(toxicity_state)
+        orders  = self._generate_quotes(book) if len(self._active_quotes) < 2 else []
 
-        cancels.extend(self._cancel_toxic_quotes(toxicity_state, book))
+        return orders, cancels
 
-        if len(self._active_quotes) < 2:
-            actions.extend(self._generate_guerrilla_quotes(book))
-
-        return actions, cancels
-
-    def _cancel_toxic_quotes(self, toxicity_state: dict, book: OrderBook) -> List[str]:
+    def _cancel_toxic_quotes(self, toxicity_state: dict) -> List[str]:
         cancels = []
         for qid, quote in list(self._active_quotes.items()):
-            if (quote.side == Side.BUY and toxicity_state.get("directional_signal") == Side.SELL) or \
-               (quote.side == Side.SELL and toxicity_state.get("directional_signal") == Side.BUY):
-                if toxicity_state.get("toxicity_score", 0) > self.toxicity_cancel_threshold:
-                    cancels.append(qid)
-                    quote.cancel_reason = "TOXIC_FLOW"
-                    self._cancel_log.append({"id": qid, "reason": "TOXIC_FLOW"})
-                    del self._active_quotes[qid]
-                    logger.info("GUERRILLA CANCEL: %s @ %.1f", quote.side.value, quote.price)
+            directional = toxicity_state.get("directional_signal")
+            if directional is None:
+                continue
+            adverse = (quote.side == Side.BUY and directional == Side.SELL) or \
+                      (quote.side == Side.SELL and directional == Side.BUY)
+            if adverse and toxicity_state.get("toxicity_score", 0) > self.toxicity_cancel_threshold:
+                cancels.append(qid)
+                quote.cancel_reason = "TOXIC_FLOW"
+                self._cancel_log.append({"id": qid, "reason": "TOXIC_FLOW"})
+                del self._active_quotes[qid]
+                logger.info("GUERRILLA CANCEL: %s @ %.1f", quote.side.value, quote.price)
         return cancels
 
-    def _generate_guerrilla_quotes(self, book: OrderBook) -> List[ExecutionOrder]:
-        mid = book.mid
-        inventory_skew = self.inventory.net_position
-
-        reservation = self.as_model.reservation_price(mid, inventory_skew)
-        optimal_spread = self.as_model.optimal_spread()
-
+    def _generate_quotes(self, book: OrderBook) -> List[ExecutionOrder]:
+        mid          = book.mid
+        reservation  = self.as_model.reservation_price(mid, self.inventory.net_position)
+        half_spread  = self.as_model.optimal_spread() / 2
         orders: List[ExecutionOrder] = []
 
-        # Bid
-        bid_price = reservation - optimal_spread / 2
-        bid_size = self.base_size_usd / bid_price
-        if abs(inventory_skew) < self.max_inventory:
-            orders.append(ExecutionOrder(
-                side=Side.BUY,
-                price=round(bid_price, 1),
-                size=round(bid_size, 3),
-                order_type=OrderType.POST_ONLY,
-                client_id=f"guerrilla_bid_{int(time.time())}",
-                post_only=True,
-            ))
-
-        # Ask
-        ask_price = reservation + optimal_spread / 2
-        ask_size = self.base_size_usd / ask_price
-        if abs(inventory_skew) < self.max_inventory:
-            orders.append(ExecutionOrder(
-                side=Side.SELL,
-                price=round(ask_price, 1),
-                size=round(ask_size, 3),
-                order_type=OrderType.POST_ONLY,
-                client_id=f"guerrilla_ask_{int(time.time())}",
-                post_only=True,
-            ))
-
-        for order in orders:
-            q = GuerrillaQuote(
-                side=order.side,
-                price=order.price,
-                size=order.size,
-                reservation_price=reservation,
-            )
-            self._active_quotes[q.order_id] = q
+        if abs(self.inventory.net_position) < self.max_inventory:
+            for side, price in [(Side.BUY, reservation - half_spread), (Side.SELL, reservation + half_spread)]:
+                size    = round(self.base_size_usd / price, 3)
+                tag     = "bid" if side == Side.BUY else "ask"
+                order   = ExecutionOrder(
+                    side=side, price=round(price, 1), size=size,
+                    order_type=OrderType.POST_ONLY,
+                    client_id=f"guerrilla_{tag}_{int(time.time())}",
+                    post_only=True,
+                )
+                quote = GuerrillaQuote(side=side, price=order.price, size=size, reservation_price=reservation)
+                self._active_quotes[quote.order_id] = quote
+                orders.append(order)
 
         return orders
 
@@ -168,11 +154,8 @@ class AdaptiveGuerrillaStrategy:
             for qid, quote in list(self._active_quotes.items()):
                 if abs(t.price - quote.price) < 0.01 and t.side == quote.side.opposite():
                     self.inventory.update_on_fill(
-                        side=quote.side,
-                        size=quote.size,
-                        fill_price=t.price,
-                        mark_price=book.mid,
-                        is_maker=True,
+                        side=quote.side, size=quote.size,
+                        fill_price=t.price, mark_price=book.mid, is_maker=True,
                     )
                     del self._active_quotes[qid]
                     break
@@ -184,32 +167,33 @@ class AdaptiveGuerrillaStrategy:
 
 
 def simulate_adaptive_guerrilla(n_ticks: int = 400, mid: float = 50_000.0) -> None:
-    rng = np.random.default_rng(123)
+    rng      = np.random.default_rng(123)
     strategy = AdaptiveGuerrillaStrategy()
 
     for i in range(n_ticks):
-        book = simulate_order_book(mid=mid, rng=rng)
+        book   = simulate_order_book(mid=mid, rng=rng)
         trades = simulate_trade_tape(
-            n_trades=rng.integers(4, 18),
-            mid=mid,
-            informed_fraction=0.45 if i > 200 else 0.08,
-            rng=rng,
+            n_trades=rng.integers(4, 18), mid=mid,
+            informed_fraction=0.45 if i > 200 else 0.08, rng=rng,
         )
-
-        new_orders, cancels = strategy.update(book, trades)
+        strategy.update(book, trades)
 
         if i % 80 == 0:
+            tox    = strategy.toxicity.update(book, trades)["toxicity_score"]
+            t_rem  = strategy.as_model.remaining_t
+            spread = strategy.as_model.optimal_spread()
             print(
                 f"[TICK {i:3d}] mid={mid:.1f} | inv={strategy.inventory.net_position:.2f} | "
-                f"cancel_rate={strategy.cancel_rate:.1%} | toxicity={strategy.toxicity.update(book, trades)['toxicity_score']:.2f}"
+                f"cancel_rate={strategy.cancel_rate:.1%} | toxicity={tox:.2f} | "
+                f"T-t={t_rem:.1f}s | spread={spread:.4f}"
             )
 
         if rng.random() < 0.4:
             mid += rng.normal(0, 8)
 
     print(f"Final inventory: {strategy.inventory.net_position:.2f}")
-    print(f"Total cancels: {len(strategy._cancel_log)}")
-    print(f"Realized PnL: {strategy.inventory.realized_pnl:.2f}")
+    print(f"Total cancels:   {len(strategy._cancel_log)}")
+    print(f"Realized PnL:    {strategy.inventory.realized_pnl:.2f}")
 
 
 if __name__ == "__main__":
