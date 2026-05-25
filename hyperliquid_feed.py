@@ -2,8 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from queue import Queue
-from typing import Callable, Dict, Any, List
+from typing import Callable, Dict, Any, List, Optional
 import time
 
 from hyperliquid.utils import constants
@@ -24,13 +23,16 @@ class HyperliquidFeed:
         api_url   = constants.TESTNET_API_URL if testnet else constants.MAINNET_API_URL
         self.info = Info(api_url, skip_ws=False)
 
-        self._book_queue:  Queue = Queue()
-        self._trade_queue: Queue = Queue()
+        # asyncio.Queue owned by the event loop; SDK callbacks write via call_soon_threadsafe.
+        self._book_queue:  asyncio.Queue = asyncio.Queue()
+        self._trade_queue: asyncio.Queue = asyncio.Queue()
+        self._loop:   Optional[asyncio.AbstractEventLoop] = None
         self._running = False
 
     async def start(self, book_handler: Callable, trade_handler: Callable) -> None:
         self._book_handler  = book_handler
         self._trade_handler = trade_handler
+        self._loop          = asyncio.get_running_loop()
         self._running       = True
 
         self.info.subscribe({"type": "l2Book", "coin": self.coin}, self._on_book_raw)
@@ -41,20 +43,24 @@ class HyperliquidFeed:
         asyncio.create_task(self._book_consumer())
         asyncio.create_task(self._trade_consumer())
 
+    #  SDK callbacks (background thread) 
+
     def _on_book_raw(self, data: Dict[str, Any]) -> None:
-        if data.get("channel") == "l2Book" and data.get("data"):
-            self._book_queue.put(data["data"])
+        if data.get("channel") == "l2Book" and data.get("data") and self._loop:
+            self._loop.call_soon_threadsafe(self._book_queue.put_nowait, data["data"])
 
     def _on_trade_raw(self, data: Dict[str, Any]) -> None:
-        if data.get("channel") == "trades" and data.get("data"):
-            self._trade_queue.put(data["data"])
+        if data.get("channel") == "trades" and data.get("data") and self._loop:
+            self._loop.call_soon_threadsafe(self._trade_queue.put_nowait, data["data"])
+
+    # Consumers (event loop) 
 
     async def _book_consumer(self) -> None:
         while self._running:
             try:
-                raw = await asyncio.get_running_loop().run_in_executor(None, self._book_queue.get)
+                raw  = await self._book_queue.get()
                 book = self._parse_l2book(raw)
-                if book and self._book_handler:
+                if book:
                     await self._book_handler(book)
             except Exception as e:
                 if self._running:
@@ -63,22 +69,22 @@ class HyperliquidFeed:
     async def _trade_consumer(self) -> None:
         while self._running:
             try:
-                raw    = await asyncio.get_running_loop().run_in_executor(None, self._trade_queue.get)
+                raw    = await self._trade_queue.get()
                 trades = self._parse_trades(raw)
-                if trades and self._trade_handler:
+                if trades:
                     await self._trade_handler(trades)
             except Exception as e:
                 if self._running:
                     logger.error("Trade consumer error: %s", e)
 
+    # Parsers 
+
     def _parse_l2book(self, data: Dict) -> Optional[OrderBook]:
         try:
-            levels    = data.get("levels", [[], []])
+            levels           = data.get("levels", [[], []])
             bids_raw, asks_raw = levels[0], levels[1]
-
             bids = [BookLevel(price=float(l["px"]), size=float(l["sz"]), order_count=1) for l in bids_raw[:20]]
             asks = [BookLevel(price=float(l["px"]), size=float(l["sz"]), order_count=1) for l in asks_raw[:20]]
-
             return OrderBook(bids=bids, asks=asks, timestamp=time.time(), sequence_id=int(data.get("ts", 0)))
         except Exception as e:
             logger.error("l2Book parse error: %s", e)
