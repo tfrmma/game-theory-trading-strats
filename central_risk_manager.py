@@ -12,11 +12,6 @@ from init import ExecutionOrder, InventoryState, Side, MarketRegime
 
 logger = logging.getLogger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Configuration
-# ---------------------------------------------------------------------------
-
 @dataclass
 class RiskConfig:
     # Hard position and loss limits
@@ -41,11 +36,6 @@ class RiskConfig:
     size_decimals: int = 4                  # BTC perp on Hyperliquid = 4 (step = 0.0001)
     event_log_maxlen: int = 2_000           # rolling audit deque cap
 
-
-# ---------------------------------------------------------------------------
-# Internal audit record
-# ---------------------------------------------------------------------------
-
 @dataclass
 class RiskEvent:
     ts: float
@@ -53,66 +43,30 @@ class RiskEvent:
     strategy: Optional[str]
     detail: str
 
-
-# ---------------------------------------------------------------------------
-# Manager
-# ---------------------------------------------------------------------------
-
 class CentralRiskManager:
-    """
-    Deterministic pre-trade risk gate and session-level circuit breaker.
-
-    Intended call order inside CentralRunner per tick:
-        1.  update_market_state(mid)                   — keep mid fresh for fat-finger
-        2.  update_global_pnl(realized, unrealized)    — update HWM, check limits
-        3.  pre_flight_check(strat, orders, inv, vol, regime)  — filter/shave orders
-        4.  report_toxic_fill(strat)                   — after detecting adverse fill
-
-    All methods are designed to be called from a single async loop thread.
-    No internal locks — the caller owns the concurrency model.
-    """
 
     def __init__(self, config: RiskConfig) -> None:
         self.config = config
 
-        # Derived lot-size constant — computed once, used on every shave.
-        # math.pow avoids float division chains that can drift on repeated use.
         self._min_size_step: float = math.pow(10.0, -config.size_decimals)
 
         self.is_halted: bool = False
         self._halt_reason: Optional[str] = None
 
-        # Session PnL tracking
         self._hwm: float = 0.0
         self._session_pnl: float = 0.0
         self._session_start_ts: float = time.time()
 
-        # Per-strategy cooldown expiry timestamps
         self._cooldowns: Dict[str, float] = {}
 
-        # Last known mid for fat-finger price checks
         self._last_mid: Optional[float] = None
 
-        # Bounded deque — O(1) append, zero GC pressure from unbounded growth.
-        # When full, the oldest event is evicted automatically.
         self._event_log: Deque[RiskEvent] = deque(maxlen=config.event_log_maxlen)
 
-    # ── Market State ────────────────────────────────────────────────────────
-
     def update_market_state(self, mid: float) -> None:
-        """
-        Must be called once per tick before pre_flight_check.
-        Keeps the mid current so fat-finger price deviation checks are valid.
-        """
         self._last_mid = mid
 
-    # ── PnL & Circuit Breaker ───────────────────────────────────────────────
-
     def update_global_pnl(self, realized_pnl: float, unrealized_pnl: float) -> bool:
-        """
-        Updates session PnL and High-Water Mark.
-        Activates halt and returns False if max_drawdown_limit or daily_loss_limit is breached.
-        """
         if self.is_halted:
             return False
 
@@ -136,8 +90,6 @@ class CentralRiskManager:
 
         return True
 
-    # ── Pre-Trade Filter ────────────────────────────────────────────────────
-
     def pre_flight_check(
         self,
         strategy_name: str,
@@ -146,25 +98,12 @@ class CentralRiskManager:
         current_volatility: float,
         market_regime: MarketRegime,
     ) -> List[ExecutionOrder]:
-        """
-        Intercepts strategy orders before they touch the connector.
-
-        Checks applied in order:
-          1. Global halt → return []
-          2. Fat-finger size and price deviation → discard individual order
-          3. Toxicity cooldown → block orders that increase exposure
-          4. Sizing shaver → truncate orders that would breach effective max position
-
-        Returns the filtered and possibly size-modified order list.
-        Running inventory is updated per-order within the batch so that a sequence
-        of orders doesn't individually pass but collectively violate the limit.
-        """
         if self.is_halted:
             return []
 
         effective_max = self._effective_max_position(current_volatility, market_regime)
         in_cooldown   = self._is_in_cooldown(strategy_name)
-        running_net   = current_inventory.net_position  # tracks intra-batch position
+        running_net   = current_inventory.net_position
 
         approved: List[ExecutionOrder] = []
 
@@ -187,8 +126,6 @@ class CentralRiskManager:
         effective_max: float,
         in_cooldown: bool,
     ) -> Optional[ExecutionOrder]:
-
-        # ── Fat Finger: size ────────────────────────────────────────────────
         max_single = self.config.max_net_position * self.config.max_single_order_fraction
         if order.size > max_single:
             self._log(
@@ -200,8 +137,6 @@ class CentralRiskManager:
                 strategy_name, order.size, max_single,
             )
             return None
-
-        # ── Fat Finger: price deviation ─────────────────────────────────────
         if self._last_mid is not None:
             dev = abs(order.price - self._last_mid) / self._last_mid
             if dev > self.config.max_price_deviation_pct:
@@ -215,8 +150,6 @@ class CentralRiskManager:
                     strategy_name, order.price, dev * 100.0, self._last_mid,
                 )
                 return None
-
-        # ── Toxicity Cooldown ───────────────────────────────────────────────
         if in_cooldown and not self._reduces_skew(order, current_net):
             remaining = self.cooldown_remaining(strategy_name)
             self._log(
@@ -228,8 +161,6 @@ class CentralRiskManager:
                 strategy_name, order.side.value, remaining,
             )
             return None
-
-        # ── Sizing Shaver ───────────────────────────────────────────────────
         return self._shave(order, strategy_name, current_net, effective_max)
 
     def _shave(
@@ -239,14 +170,6 @@ class CentralRiskManager:
         current_net: float,
         effective_max: float,
     ) -> Optional[ExecutionOrder]:
-        """
-        Truncates order size to fit within effective_max.
-
-        Policy:
-        - Orders that reduce inventory skew pass at full size unconditionally.
-        - Orders that increase exposure are truncated to the available headroom.
-        - If headroom is zero or negative, the order is discarded.
-        """
         signed_delta = order.size if order.side == Side.BUY else -order.size
         new_net      = current_net + signed_delta
 
@@ -272,13 +195,9 @@ class CentralRiskManager:
             )
             return None
 
-        # Floor-truncate to the exchange lot step so the shaved size is always
-        # a valid multiple of min_size_step. Standard rounding can produce a value
-        # one step above the true headroom, which the API rejects.
         floored_size = math.floor(headroom / self._min_size_step) * self._min_size_step
 
         if floored_size < self._min_size_step:
-            # Headroom exists but is sub-lot — no valid order can be constructed.
             self._log(
                 "SHAVE", strategy_name,
                 f"headroom={headroom:.8f} < min_step={self._min_size_step:.8f} — discarded",
@@ -303,19 +222,10 @@ class CentralRiskManager:
         )
         return shaved
 
-    # ── Toxicity Cooldown ───────────────────────────────────────────────────
-
     def report_toxic_fill(self, strategy_name: str) -> None:
-        """
-        Registers an adverse selection event and applies a cooldown window.
-        Multiple rapid calls extend the cooldown additively up to 2× the configured value.
-        """
         now    = time.time()
         prev   = self._cooldowns.get(strategy_name, now)
-        # Extend from wherever the current expiry is, not from now,
-        # so repeated fills within an active cooldown compound it.
         expiry = max(now, prev) + self.config.toxicity_cooldown_s
-        # Cap at 2× the base cooldown to prevent runaway lockout
         max_expiry = now + self.config.toxicity_cooldown_s * 2.0
         self._cooldowns[strategy_name] = min(expiry, max_expiry)
 
@@ -330,20 +240,7 @@ class CentralRiskManager:
         """Seconds remaining in cooldown. 0.0 if not active."""
         return max(0.0, self._cooldowns.get(strategy_name, 0.0) - time.time())
 
-    # ── Internal Helpers ────────────────────────────────────────────────────
-
     def _effective_max_position(self, vol: float, regime: MarketRegime) -> float:
-        """
-        Derives the position limit for the current market state.
-
-        vol_factor = max(1, (vol / vol_baseline) × volatility_scalar)
-        Scales max_net_position down when realized vol exceeds baseline.
-
-        Regime haircuts are applied multiplicatively on top:
-          TOXIC    → retains (1 - toxic_haircut) of vol-adjusted limit
-          ILLIQUID → retains (1 - illiquid_haircut) of vol-adjusted limit
-          others   → no additional haircut
-        """
         vol_ratio  = vol / max(self.config.vol_baseline, 1e-9)
         vol_factor = max(1.0, vol_ratio * self.config.volatility_scalar)
         vol_scaled = self.config.max_net_position / vol_factor
@@ -372,8 +269,6 @@ class CentralRiskManager:
             ts=time.time(), event_type=event_type, strategy=strategy, detail=detail,
         ))
 
-    # ── Diagnostics & Session Management ───────────────────────────────────
-
     @property
     def session_pnl(self) -> float:
         return self._session_pnl
@@ -387,7 +282,6 @@ class CentralRiskManager:
         return self._halt_reason
 
     def status(self) -> dict:
-        """Snapshot of current risk state — safe to log or push to a monitoring endpoint."""
         return {
             "is_halted":   self.is_halted,
             "halt_reason": self._halt_reason,
@@ -404,10 +298,6 @@ class CentralRiskManager:
         return list(reversed(self._event_log[-n:]))
 
     def reset_session(self) -> None:
-        """
-        Resets PnL counters and clears cooldowns for a new trading session.
-        Does NOT clear is_halted — an explicit unhalt() call is required.
-        """
         self._session_pnl      = 0.0
         self._hwm              = 0.0
         self._cooldowns.clear()
@@ -416,10 +306,6 @@ class CentralRiskManager:
         logger.info("Risk session reset.")
 
     def unhalt(self, operator_note: str = "") -> None:
-        """
-        Clears halt state. Requires an explicit operator call — never auto-cleared.
-        Log the reason for audit purposes.
-        """
         prev_reason = self._halt_reason
         self.is_halted    = False
         self._halt_reason = None
