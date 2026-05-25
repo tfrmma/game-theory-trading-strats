@@ -14,15 +14,8 @@ logger = logging.getLogger(__name__)
 # Markout horizons in seconds — trade microstructure standard
 MARKOUT_HORIZONS_S: Tuple[float, ...] = (5.0, 15.0, 30.0, 60.0, 300.0)
 
-
-# Core data structures
-
 @dataclass
 class FillRecord:
-    """
-    Everything needed to compute post-fill adverse selection metrics.
-    Created at fill time; mid_at_horizons populated as time elapses.
-    """
     fill_id:         str
     strategy:        str
     side:            Side
@@ -37,60 +30,31 @@ class FillRecord:
 
     @property
     def direction(self) -> float:
-        """+1 for buy, -1 for sell."""
         return 1.0 if self.side == Side.BUY else -1.0
 
     @property
     def effective_spread_bps(self) -> float:
-        """
-        Effective half-spread in bps = |fill - mid| / mid × 10000.
-        For a maker buy below mid this is negative (we captured spread).
-        """
         return (self.fill_price - self.mid_at_fill) / self.mid_at_fill * 1e4 * self.direction
 
     def realized_spread_bps(self, horizon_s: float) -> Optional[float]:
-        """
-        Realized half-spread at horizon h:
-            direction × (fill_price − mid_h) / mid_fill × 10000
-        Positive = we kept some of the spread. Negative = adverse selection ate it.
-        """
         mid_h = self.mid_at_horizons.get(horizon_s)
         if mid_h is None:
             return None
         return self.direction * (self.fill_price - mid_h) / self.mid_at_fill * 1e4
 
     def price_impact_bps(self, horizon_s: float) -> Optional[float]:
-        """
-        Permanent price impact = effective_spread − realized_spread.
-        Represents the information content of the flow that filled us.
-        """
         rs = self.realized_spread_bps(horizon_s)
         if rs is None:
             return None
         return self.effective_spread_bps - rs
 
     def markout_pnl(self, horizon_s: float) -> Optional[float]:
-        """
-        PnL at horizon h:  direction × (mid_h − fill_price) × size.
-        Negative = we were adversely selected and are holding a losing position.
-        """
         mid_h = self.mid_at_horizons.get(horizon_s)
         if mid_h is None:
             return None
         return self.direction * (mid_h - self.fill_price) * self.fill_size
 
-
-# Markout tracker
-
 class MarkoutTracker:
-    """
-    Receives fills and mid updates; computes markout PnL at configured horizons.
-
-    Usage:
-        tracker.record_fill(fill)            # at fill time
-        tracker.update_mid(book.mid, now)    # on every tick
-        report = tracker.report()            # query at any time
-    """
 
     def __init__(
         self,
@@ -125,7 +89,6 @@ class MarkoutTracker:
     def report(self, strategy: Optional[str] = None) -> "MarkoutReport":
         fills = [f for f in self._closed_fills if strategy is None or f.strategy == strategy]
         return MarkoutReport.from_fills(fills, self.horizons_s)
-
 
 @dataclass
 class MarkoutReport:
@@ -188,18 +151,8 @@ class MarkoutReport:
             print(f"  {h:>7.0f}s  {mk:>18.6f}  {rs:>13.3f}bps  {pi:>12.3f}bps")
         print(f"{'='*60}\n")
 
-
-# Spread decomposition (Roll model)
-
 class RollSpreadEstimator:
-    """
-    Roll (1984) implied spread from serial covariance of trade price changes.
-        s = 2 × sqrt(max(0, -cov(ΔP_t, ΔP_{t-1})))
-
-    Interpretation: if trades alternate between bid and ask, successive price
-    changes are negatively autocorrelated. The stronger the autocorrelation,
-    the wider the implied effective spread.
-    """
+    """Roll (1984): s = 2√(max(0, -cov(ΔP_t, ΔP_{t-1}))). Negative serial autocorrelation = spread."""
 
     def __init__(self, window: int = 200) -> None:
         self._dp: Deque[float] = deque(maxlen=window + 1)
@@ -220,15 +173,8 @@ class RollSpreadEstimator:
         cov   = float(np.cov(arr[:-1], arr[1:])[0, 1])
         return 2.0 * np.sqrt(max(0.0, -cov))
 
-
-# Amihud illiquidity
-
 class AmihudTracker:
-    """
-    Amihud (2002) illiquidity ratio: |r_t| / volume_t.
-    Higher = thinner book, each unit of volume causes more price impact.
-    Useful for dynamic spread scaling and regime detection.
-    """
+    """Amihud (2002): |r_t| / volume_t. Higher = more price impact per unit volume."""
 
     def __init__(self, window: int = 100) -> None:
         self._ratios: Deque[float] = deque(maxlen=window)
@@ -255,14 +201,7 @@ class AmihudTracker:
         if v < 1e-5:  return "ILLIQUID"
         return "EXTREMELY_ILLIQUID"
 
-
-# Composite reporter (plugs into BacktestEngine or live runner)
-
 class AdverseSelectionMonitor:
-    """
-    Combines MarkoutTracker + RollEstimator + AmihudTracker into one object.
-    Call update() on every tick; create_fill_record() after each fill.
-    """
 
     def __init__(self) -> None:
         self.markout  = MarkoutTracker()
@@ -310,9 +249,6 @@ class AdverseSelectionMonitor:
     def report(self, strategy: Optional[str] = None) -> MarkoutReport:
         return self.markout.report(strategy)
 
-
-# Simulation demo
-
 def simulate_adverse_selection_metrics() -> None:
     from init import simulate_order_book, simulate_trade_tape
     import time
@@ -350,7 +286,6 @@ def simulate_adverse_selection_metrics() -> None:
         mid += rng.normal(0, 6)
 
     monitor.report("test_mm").print("test_mm strategy")
-
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
