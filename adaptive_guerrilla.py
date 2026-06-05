@@ -1,12 +1,12 @@
-/**
- * @file "adaptive_guerrilla.py"
- * @author Taha - Algorithmic Trader
- * @brief Institutional-grade "game-theory-trading-strats".
- * 
- * @note This is a public structural showcase. For full production-grade 
- *       deployment, architecture consulting, or recruitment inquiries:
- *       Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc]
- */
+"""
+@file adaptive_guerrilla.py
+@author Taha - Algorithmic Trader
+@brief Institutional-grade game-theory-trading-strats.
+
+@note This is a public structural showcase. For full production-grade 
+      deployment, architecture consulting, or recruitment inquiries:
+      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
+"""
 
 from __future__ import annotations
 
@@ -210,12 +210,12 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
     simulate_adaptive_guerrilla()
 
-/**
- * @file "adaptive_guerrilla.py"
- * @author Taha - Algorithmic Trader
- * @brief Institutional-grade "game-theory-trading-strats".
- * 
- * @note This is a public structural showcase. For full production-grade 
- *       deployment, architecture consulting, or recruitment inquiries:
- *       Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc]
- */
+"""
+@file adaptive_guerrilla.py
+@author Taha - Algorithmic Trader
+@brief Institutional-grade game-theory-trading-strats.
+
+@note This is a public structural showcase. For full production-grade 
+      deployment, architecture consulting, or recruitment inquiries:
+      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
+"""
