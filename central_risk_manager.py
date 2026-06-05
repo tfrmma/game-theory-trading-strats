@@ -1,3 +1,13 @@
+"""
+@file central_risk_manager.py
+@author Taha - Algorithmic Trader
+@brief Institutional-grade game-theory-trading-strats.
+
+@note This is a public structural showcase. For full production-grade 
+      deployment, architecture consulting, or recruitment inquiries:
+      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
+"""
+
 from __future__ import annotations
 
 import copy
@@ -35,6 +45,16 @@ class RiskConfig:
     # Asset lot-size constraints (venue-specific — query from exchange meta on startup)
     size_decimals: int = 4                  # BTC perp on Hyperliquid = 4 (step = 0.0001)
     event_log_maxlen: int = 2_000           # rolling audit deque cap
+
+"""
+@file central_risk_manager.py
+@author Taha - Algorithmic Trader
+@brief Institutional-grade game-theory-trading-strats.
+
+@note This is a public structural showcase. For full production-grade 
+      deployment, architecture consulting, or recruitment inquiries:
+      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
+"""
 
 @dataclass
 class RiskEvent:
@@ -311,3 +331,13 @@ class CentralRiskManager:
         self._halt_reason = None
         self._log("UNHALT", None, f"previous_reason='{prev_reason}' note='{operator_note}'")
         logger.warning("UNHALT by operator. Was: '%s'. Note: '%s'", prev_reason, operator_note)
+
+"""
+@file central_risk_manager.py
+@author Taha - Algorithmic Trader
+@brief Institutional-grade game-theory-trading-strats.
+
+@note This is a public structural showcase. For full production-grade 
+      deployment, architecture consulting, or recruitment inquiries:
+      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
+"""
