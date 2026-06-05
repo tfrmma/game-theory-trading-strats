@@ -5,7 +5,7 @@
  * 
  * @note This is a public structural showcase. For full production-grade 
  *       deployment, architecture consulting, or recruitment inquiries:
- *       Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc]
+ *       Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
  */
 
 from __future__ import annotations
@@ -477,5 +477,5 @@ if __name__ == "__main__":
  * 
  * @note This is a public structural showcase. For full production-grade 
  *       deployment, architecture consulting, or recruitment inquiries:
- *       Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc]
+ *       Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
  */
