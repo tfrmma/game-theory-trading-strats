@@ -1,13 +1,3 @@
-"""
-@file RL_tuner.py
-@author Taha - Algorithmic Trader
-@brief Institutional-grade game-theory-trading-strats.
-
-@note This is a public structural showcase. For full production-grade 
-      deployment, architecture consulting, or recruitment inquiries:
-      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
-"""
-
 from __future__ import annotations
 
 import logging
@@ -469,13 +459,3 @@ def demo_pipeline(n_ticks: int = 200) -> None:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
     demo_pipeline()
-
-"""
-@file RL_tuner.py
-@author Taha - Algorithmic Trader
-@brief Institutional-grade game-theory-trading-strats.
-
-@note This is a public structural showcase. For full production-grade 
-      deployment, architecture consulting, or recruitment inquiries:
-      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
-"""
