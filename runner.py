@@ -132,7 +132,7 @@ class CentralRunner:
 
             elif name == "funding_arb":
                 snapshot = FundingSnapshot(
-                    rate=0.0006 if tick > 200 else 0.0001,
+                    rate=0.000075 if tick > 200 else 0.0000125,  # 1h rates 
                     next_funding_ts=time.time() + 3600,
                     open_interest=self.oi,
                     mark_price=self.mid,
