@@ -1,13 +1,4 @@
 """
-@file runner.py
-@author Taha - Algorithmic Trader
-@brief Institutional-grade game-theory-trading-strats.
-
-@note This is a public structural showcase. For full production-grade 
-      deployment, architecture consulting, or recruitment inquiries:
-      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
-"""
-"""
 Central runner — simulation and live Hyperliquid modes.
 """
 from __future__ import annotations
@@ -199,13 +190,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
-"""
-@file runner.py
-@author Taha - Algorithmic Trader
-@brief Institutional-grade game-theory-trading-strats.
-
-@note This is a public structural showcase. For full production-grade 
-      deployment, architecture consulting, or recruitment inquiries:
-      Contact: email: fadilrezokt@gmail.com / linkedin.com/in/tahaotc
-"""
