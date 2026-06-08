@@ -117,7 +117,7 @@ class FundingSnapshot:
 
     @property
     def annualized_rate(self) -> float:
-        return self.rate * 3 * 365
+        return self.rate * 24 * 365
 
     @property
     def basis_bps(self) -> float:
