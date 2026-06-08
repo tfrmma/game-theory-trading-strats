@@ -12,11 +12,11 @@ from init import FundingSnapshot, Trade, OrderBook, Side, Signal, SignalStrength
 
 logger = logging.getLogger(__name__)
 
-# 8h epoch constants
-FUNDING_INTERVAL_S        = 8 * 3600
+# 1h epoch constants (Hyperliquid pays funding every hour)
+FUNDING_INTERVAL_S        = 1 * 3600
 EXTREME_FUNDING_THRESHOLD = 0.0005   # ~22% annualized
 VERY_EXTREME_THRESHOLD    = 0.001    # ~45% annualized
-PRE_PRINT_ENTRY_WINDOW_S  = 45 * 60
+PRE_PRINT_ENTRY_WINDOW_S  = 12 * 60
 POST_PRINT_EXIT_WINDOW_S  = 5  * 60
 
 
@@ -46,7 +46,7 @@ class FundingMonitor:
 
     @property
     def annualized_rate(self) -> float:
-        return self.current_rate * 3 * 365
+        return self.current_rate * 24 * 365
 
     @property
     def z_score(self) -> float:
@@ -140,8 +140,8 @@ class FundingArbitragePosition:
 class FundingArbitrageStrategy:
     """
     Two modes:
-      static   — delta-neutral carry, hold multiple epochs, exit when rate normalizes.
-      tactical — enter 45min before print, collect one payment, unwind within 5min of print.
+      static   — delta-neutral carry, hold multiple 1h epochs, exit when rate normalizes.
+      tactical — enter 12min before the hourly print, collect one payment, unwind within 5min of print.
     """
 
     def __init__(
@@ -307,7 +307,7 @@ def simulate_funding_arb(n_epochs: int = 10, base_mid: float = 50_000.0) -> None
         rate_decay  = 1 - (epoch / n_epochs) * 0.6
         rate        = base_rate * rate_decay * rng.lognormal(0, 0.15)
         mark_price  = index_price * (1 + 0.002 * (1 - epoch / n_epochs))
-        next_print  = time.time() + 40 * 60
+        next_print  = time.time() + 10 * 60
 
         snapshot = FundingSnapshot(
             rate=rate,
