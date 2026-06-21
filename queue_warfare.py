@@ -1,15 +1,12 @@
 from __future__ import annotations
-
 import logging
 import time
 import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
-
 import numpy as np
 from scipy.stats import poisson
-
 from init import BookLevel, OrderBook, Trade, Side, simulate_order_book, simulate_trade_tape
 
 logger = logging.getLogger(__name__)
@@ -49,7 +46,6 @@ class IcebergDetector:
     Detects iceberg orders via level replenishment after trades.
     Iceberg ahead = fill probability model underestimates true queue depth.
     """
-
     def __init__(self, replenish_threshold: float = 5.0) -> None:
         self.replenish_threshold = replenish_threshold
         self._prev_bid_sizes: Dict[float, float] = {}
@@ -83,27 +79,22 @@ class IcebergDetector:
         return self.confirmed_icebergs
 
 
-
 class LevelCancellationTracker:
     """
     Estimates the per-level cancellation ratio alpha = cancelled_vol / (cancelled_vol + traded_vol).
-
     On each tick we compute the size that disappeared from a level without a matching trade —
     that delta is pure cancellation. Rolling alpha tells us how fast the queue drains ahead of us
     from cancellations alone, which the naive Poisson fill model completely misses.
-
     Adjusted effective queue ahead:
         effective_ahead = queue_ahead * (1 - alpha)
-
     Higher alpha → queue drains faster than trades suggest → fill probability is higher
     than the raw Poisson estimate, and the Winner's Curse risk is lower.
     """
-
     def __init__(self, window: int = 50, min_obs: int = 10) -> None:
-        self.window   = window
-        self.min_obs  = min_obs
+        self.window = window
+        self.min_obs = min_obs
         self._cancel_vol: Dict[float, Deque[float]] = {}
-        self._trade_vol:  Dict[float, Deque[float]] = {}
+        self._trade_vol: Dict[float, Deque[float]] = {}
         self._prev_sizes: Dict[float, float] = {}
 
     def update(self, book: OrderBook, trades: List[Trade]) -> None:
@@ -121,14 +112,13 @@ class LevelCancellationTracker:
                 cancelled = prev_size - trade_by_price.get(price, 0.0)
             else:
                 size_drop = prev_size - current_sizes[price]
-                traded    = trade_by_price.get(price, 0.0)
+                traded = trade_by_price.get(price, 0.0)
                 cancelled = max(0.0, size_drop - traded)
 
             traded_here = trade_by_price.get(price, 0.0)
-
             if price not in self._cancel_vol:
                 self._cancel_vol[price] = deque(maxlen=self.window)
-                self._trade_vol[price]  = deque(maxlen=self.window)
+                self._trade_vol[price] = deque(maxlen=self.window)
 
             self._cancel_vol[price].append(cancelled)
             self._trade_vol[price].append(traded_here)
@@ -136,17 +126,14 @@ class LevelCancellationTracker:
         self._prev_sizes = {p: s for p, s in current_sizes.items()}
 
     def alpha(self, price: float) -> float:
-        """
-        Cancellation ratio at price level ∈ [0, 1).
-        Returns 0.0 if insufficient observations.
-        """
+        """Cancellation ratio at price level ∈ [0, 1). Returns 0.0 if insufficient observations."""
         c_hist = self._cancel_vol.get(price)
         t_hist = self._trade_vol.get(price)
         if not c_hist or len(c_hist) < self.min_obs:
             return 0.0
         total_cancel = sum(c_hist)
-        total_trade  = sum(t_hist)
-        denom        = total_cancel + total_trade
+        total_trade = sum(t_hist)
+        denom = total_cancel + total_trade
         return total_cancel / denom if denom > 0 else 0.0
 
     def effective_queue_ahead(self, price: float, raw_queue_ahead: float) -> float:
@@ -159,7 +146,6 @@ class QueueFillModel:
     P(fill within horizon) using Poisson market order arrivals.
     λ estimated from rolling trade rate; μ_v from rolling trade size.
     """
-
     def __init__(self, window_s: float = 30.0) -> None:
         self.window_s = window_s
         self._trade_times: Deque[float] = deque()
@@ -205,7 +191,6 @@ class QueueWarfareStrategy:
     Queue position management: join when priority is good, cancel fast when OFI turns.
     Iceberg detection adjusts fill probability estimates after order placement.
     """
-
     def __init__(
         self,
         max_queue_fraction_to_join: float = 0.30,
@@ -214,39 +199,39 @@ class QueueWarfareStrategy:
         min_fill_probability: float = 0.15,
     ) -> None:
         self.max_queue_fraction_to_join = max_queue_fraction_to_join
-        self.ofi_cancel_threshold       = ofi_cancel_threshold
-        self.fill_horizon_s             = fill_horizon_s
-        self.min_fill_probability       = min_fill_probability
+        self.ofi_cancel_threshold = ofi_cancel_threshold
+        self.fill_horizon_s = fill_horizon_s
+        self.min_fill_probability = min_fill_probability
 
         self._active_positions: Dict[str, QueuePosition] = {}
-        self.fill_model    = QueueFillModel()
-        self.iceberg_det   = IcebergDetector()
+        self.fill_model = QueueFillModel()
+        self.iceberg_det = IcebergDetector()
         self.cancel_tracker = LevelCancellationTracker()
         self._ofi_history: Deque[float] = deque(maxlen=20)
         self._cancel_log: List[dict] = []
 
     def should_join_queue(self, book: OrderBook, side: Side, price: float) -> Tuple[bool, str]:
-        levels    = book.bids if side == Side.BUY else book.asks
+        levels = book.bids if side == Side.BUY else book.asks
         level_map = {lvl.price: lvl for lvl in levels}
-
         if price not in level_map:
             return False, "Level not in book"
 
-        lvl           = level_map[price]
-        total_depth   = book.bid_depth(10) if side == Side.BUY else book.ask_depth(10)
+        lvl = level_map[price]
+        total_depth = book.bid_depth(10) if side == Side.BUY else book.ask_depth(10)
         queue_fraction = lvl.size / total_depth
 
         if queue_fraction > self.max_queue_fraction_to_join:
             return False, f"Queue too full ({queue_fraction:.2f})"
 
-        alpha           = self.cancel_tracker.alpha(price)
+        alpha = self.cancel_tracker.alpha(price)
         eff_queue_ahead = self.cancel_tracker.effective_queue_ahead(price, lvl.size)
-        p_fill          = self.fill_model.fill_probability(eff_queue_ahead, self.fill_horizon_s)
+        p_fill = self.fill_model.fill_probability(eff_queue_ahead, self.fill_horizon_s)
+
         if p_fill < self.min_fill_probability:
             return False, f"Fill prob too low ({p_fill:.3f}, alpha={alpha:.2f})"
 
         if price in self.iceberg_det.confirmed_icebergs:
-            hidden     = self.iceberg_det.confirmed_icebergs[price]
+            hidden = self.iceberg_det.confirmed_icebergs[price]
             eff_hidden = self.cancel_tracker.effective_queue_ahead(price, lvl.size + hidden)
             p_fill_adj = self.fill_model.fill_probability(eff_hidden, self.fill_horizon_s)
             if p_fill_adj < self.min_fill_probability:
@@ -266,7 +251,6 @@ class QueueWarfareStrategy:
         for pos in self._active_positions.values():
             traded_at_level = sum(t.size for t in trades if abs(t.price - pos.price) < 0.01)
             # Cancellations ahead of us also advance our queue position.
-            # Scale traded consumption up by 1/(1-alpha) to approximate total drain rate.
             alpha = self.cancel_tracker.alpha(pos.price)
             drain_multiplier = 1.0 / max(1.0 - alpha, 0.01)
             pos.consumed_since_join += traded_at_level * drain_multiplier
@@ -289,7 +273,7 @@ class QueueWarfareStrategy:
             return True, f"OFI={recent_ofi:.1f} against ASK"
 
         if pos.price in self.iceberg_det.confirmed_icebergs:
-            hidden    = self.iceberg_det.confirmed_icebergs[pos.price]
+            hidden = self.iceberg_det.confirmed_icebergs[pos.price]
             p_fill_adj = self.fill_model.fill_probability(pos.estimated_ahead_of_us + hidden, 5.0)
             if p_fill_adj < 0.05:
                 return True, f"Iceberg ahead, adj p_fill={p_fill_adj:.3f}"
@@ -310,7 +294,7 @@ class QueueWarfareStrategy:
 
 
 def simulate_queue_warfare(n_ticks: int = 200, mid: float = 50_000.0) -> None:
-    rng      = np.random.default_rng(13)
+    rng = np.random.default_rng(13)
     strategy = QueueWarfareStrategy()
 
     our_order = QueuePosition(
@@ -324,29 +308,30 @@ def simulate_queue_warfare(n_ticks: int = 200, mid: float = 50_000.0) -> None:
     print(f"\nRegistered BID @ {our_order.price:.1f} | Queue ahead: {our_order.submitted_queue_depth}")
 
     for i in range(n_ticks):
-        book         = simulate_order_book(mid=mid, rng=rng)
+        book = simulate_order_book(mid=mid, rng=rng)
         informed_frac = 0.50 if i > 120 else 0.05
-        trades       = simulate_trade_tape(rng.integers(3, 10), mid, 5.0, informed_frac, rng)
+        trades = simulate_trade_tape(rng.integers(3, 10), mid, 5.0, informed_frac, rng)
 
-        ask_price    = book.asks[0].price
+        ask_price = book.asks[0].price
         can_join, reason = strategy.should_join_queue(book, Side.SELL, ask_price)
-        cancel_ids   = strategy.update(book, trades)
+
+        cancel_ids = strategy.update(book, trades)
 
         if cancel_ids:
             print(f"\n[Tick {i}] CANCEL: {cancel_ids}")
             for log in strategy._cancel_log[-len(cancel_ids):]:
-                print(f"  {log['reason']}")
+                print(f" {log['reason']}")
 
         if i == 120:
             print(f"\n[Tick {i}] *** INFORMED SELL FLOW (50%) ***")
 
         if i % 40 == 0:
-            alpha    = strategy.cancel_tracker.alpha(our_order.price)
+            alpha = strategy.cancel_tracker.alpha(our_order.price)
             eff_ahead = strategy.cancel_tracker.effective_queue_ahead(
                 our_order.price, max(0, our_order.estimated_ahead_of_us)
             )
-            p_fill   = strategy.fill_model.fill_probability(eff_ahead, 10.0)
-            ofi      = sum(t.signed_size for t in trades)
+            p_fill = strategy.fill_model.fill_probability(eff_ahead, 10.0)
+            ofi = sum(t.signed_size for t in trades)
             print(
                 f"[Tick {i:3d}] mid={mid:.1f} | p_fill={p_fill:.3f} | alpha={alpha:.2f} | "
                 f"consumed={our_order.consumed_since_join:.2f} | eff_ahead={eff_ahead:.2f} | "
@@ -359,14 +344,11 @@ def simulate_queue_warfare(n_ticks: int = 200, mid: float = 50_000.0) -> None:
     icebergs = strategy.iceberg_det.confirmed_icebergs
     print(f"\nIcebergs detected: {len(icebergs)}")
     for price, hidden in icebergs.items():
-        print(f"  {price:.1f}: est hidden = {hidden:.2f}")
+        print(f" {price:.1f}: est hidden = {hidden:.2f}")
     print(f"Total cancels: {len(strategy._cancel_log)}")
     print("="*65 + "\n")
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
-    simulate_queue_warfare()
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s")
     simulate_queue_warfare()
