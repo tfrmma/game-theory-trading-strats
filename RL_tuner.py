@@ -10,7 +10,7 @@ import numpy as np
 from init import OrderBook, Trade, Side, InventoryState
 from adaptive_guerrilla import AdaptiveGuerrillaStrategy
 from info_asymmetry import FlowToxicityClassifier
-from backtester import TickLoader, HistoricalTick
+from tick_by_tick_backtester import TickLoader, HistoricalTick
 
 logger = logging.getLogger(__name__)
 
@@ -154,7 +154,7 @@ def map_action_to_params(action: np.ndarray) -> RLParams:
 def _require_gym() -> None:
     if not _GYM:
         raise ImportError(
-            "gymnasium (or gym) is required: pip install gymnasium stable-baselines3"
+            "gymnasium is required: pip install gymnasium stable-baselines3"
         )
 
 if _GYM:
