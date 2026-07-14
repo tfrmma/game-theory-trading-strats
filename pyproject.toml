@@ -1,7 +1,7 @@
 [project]
 name = "game-theory-trading-strats"
 version = "0.1.0"
-description = "Production-grade game-theoretic trading strategies for crypto perpetuals"
+description = "Game-theoretic trading strategies for crypto perpetuals"
 authors = [{ name = "Taha" }]
 readme = "README.md"
 requires-python = ">=3.10"
@@ -9,10 +9,17 @@ license = { text = "MIT" }
 
 dependencies = [
     "numpy>=1.24.0",
-    "pandas>=2.0.0",
     "scipy>=1.10.0",
-    "hyperliquid-python-sdk",     # ← corregido (sin versión estricta)
+    "hyperliquid-python-sdk",    
 ]
+
+[project.optional-dependencies]
+# python setup_hot_paths.py build_ext --inplace  (10-100x speedup on hot loops)
+speed = ["Cython>=3.0.0"]
+# RL_tuner.py training only the observation/action/param pipeline itself
+# works without these (see README).
+rl = ["gymnasium>=0.29.0", "stable-baselines3>=2.0.0"]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
 
 [project.scripts]
 runner = "runner:main"
@@ -20,3 +27,7 @@ runner = "runner:main"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
