@@ -1,5 +1,5 @@
 """
-Central runner — simulation and live Hyperliquid modes.
+Central runner - simulation and live Hyperliquid modes.
 """
 from __future__ import annotations
 
@@ -12,7 +12,10 @@ import time
 
 import numpy as np
 
-from init import simulate_order_book, simulate_trade_tape, Side, OrderBook, Trade
+from init import (
+    simulate_order_book, simulate_trade_tape, Side, OrderBook, Trade,
+    MarketRegime, compute_realized_volatility,
+)
 from spoofing_counter import SpoofingDetector, SpoofCounterStrategy
 from predatory_liquidity import PredatoryLiquidityStrategy
 from info_asymmetry import FlowToxicityClassifier
@@ -21,6 +24,7 @@ from funding_arbitrage import FundingArbitrageStrategy, FundingSnapshot
 from liquidation_frontrun import LiquidationFrontrunStrategy
 from adaptive_guerrilla import AdaptiveGuerrillaStrategy
 from hyperliquid_feed import HyperliquidFeed
+from central_risk_manager import CentralRiskManager, RiskConfig
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +48,20 @@ class CentralRunner:
         self.toxicity  = FlowToxicityClassifier()
         self.detector  = SpoofingDetector()
 
+        # RiskConfig values below are the example from README.md's "Risk manager"
+        # section, not a calibrated production config. max_net_position/drawdown/
+        # daily_loss_limit/size_decimals must be reviewed per venue before this
+        # gates real orders. This is a global circuit breaker + pre-trade gate
+        # that was previously built (central_risk_manager.py) but never wired
+        # into the runner signals bypassed it entirely.
+        self.risk_manager = CentralRiskManager(RiskConfig(
+            max_net_position    = 5.0,
+            max_drawdown_limit  = 500.0,
+            daily_loss_limit    = 1000.0,
+            size_decimals       = 4,
+            toxicity_cooldown_s = 60.0,
+        ))
+
         self.results       = defaultdict(list)
         self.signals_log   = []
         self.strategy_pnl  = {name: 0.0 for name in self.strategies}
@@ -52,6 +70,9 @@ class CentralRunner:
         self.oi            = 1_000_000.0
         self.current_book: OrderBook | None = None
         self.feed          = None
+
+        self._mid_history: List[float] = []
+        self._last_toxicity_state: dict = {}
 
     async def run(self) -> None:
         mode = f"LIVE {self.coin} (testnet={self.testnet})" if self.live else "SIMULATION"
@@ -87,13 +108,42 @@ class CentralRunner:
         async def trade_handler(trades: List[Trade]) -> None:
             if self.current_book is None:
                 return
+
+            book = self.current_book
+            self._mid_history.append(book.mid)
+            self._last_toxicity_state = self.toxicity.update(book, trades)
+            self.risk_manager.update_market_state(book.mid)
+
+            realized_pnl = sum(self.strategy_pnl.values())
+            alive = self.risk_manager.update_global_pnl(realized_pnl, 0.0)
+            if not alive:
+                logger.critical("RISK HALTED (live): %s", self.risk_manager.halt_reason)
+                return
+
             for name, strat in self.strategies.items():
                 if name == "predatory_liquidity":
-                    signal = strat.update(self.current_book, trades)
+                    signal = strat.update(book, trades)
                     if signal:
                         self.signals_log.append((name, signal))
-                elif name in ("queue_warfare", "adaptive_guerrilla"):
-                    strat.update(self.current_book, trades)
+                elif name == "queue_warfare":
+                    strat.update(book, trades)
+                elif name == "adaptive_guerrilla":
+                    orders, cancels = strat.update(book, trades)
+                    if orders:
+                        regime = self._infer_regime()
+                        vol    = self._current_volatility()
+                        approved = self.risk_manager.pre_flight_check(
+                            strategy_name=name,
+                            proposed_orders=orders,
+                            current_inventory=strat.inventory,
+                            current_volatility=vol,
+                            market_regime=regime,
+                        )
+                        if len(approved) < len(orders):
+                            logger.info(
+                                "RISK (live): %d/%d guerrilla orders passed pre-flight",
+                                len(approved), len(orders),
+                            )
 
         await self.feed.start(book_handler, trade_handler)
 
@@ -108,7 +158,22 @@ class CentralRunner:
             await self.feed.stop()
 
     def _process_tick(self, book: OrderBook, trades: List[Trade], tick: int) -> None:
-        self.toxicity.update(book, trades)
+        self._mid_history.append(book.mid)
+        # Previously this return value was discarded VPIN/Kyle's lambda/regime
+        # were computed every tick and thrown away. Now captured for _infer_regime().
+        self._last_toxicity_state = self.toxicity.update(book, trades)
+
+        # --- Central risk manager: global circuit breaker, evaluated every tick ---
+        self.risk_manager.update_market_state(book.mid)
+        realized_pnl = sum(self.strategy_pnl.values())
+        # unrealized is hardcoded to 0.0: InventoryState.unrealized_pnl (init.py)
+        # is a stub that always returns 0.0 regardless of mark price. Flagged
+        # separately not fixed here since it's outside the scope of this pass.
+        alive = self.risk_manager.update_global_pnl(realized_pnl, 0.0)
+        if not alive:
+            if tick % 50 == 0:
+                print(f"[TICK {tick:4d}] \U0001F6D1 RISK HALTED: {self.risk_manager.halt_reason}")
+            return  # no strategy runs while halted matches CentralRiskManager's own contract
 
         for name, strat in self.strategies.items():
             pnl_before = self.strategy_pnl[name]
@@ -118,17 +183,23 @@ class CentralRunner:
                     signal = strat.process_spoof_event(ev)
                     if signal:
                         self.signals_log.append((name, signal))
-                        self.strategy_pnl[name] += np.random.normal(8, 4)
+                # No sizing/exit model exists for this strategy's Signal output yet,
+                # so there's no honest way to derive a $ PnL from it. Reporting 0.0
+                # instead of the previous np.random.normal(8, 4) noise.
 
             elif name == "predatory_liquidity":
                 signal = strat.update(book, trades)
                 if signal:
                     self.signals_log.append((name, signal))
-                    self.strategy_pnl[name] += np.random.normal(12, 5)
+                # Same limitation as spoof_counter Signal has entry/target/stop
+                # but no size, order_type, or exit trigger. No PnL fabricated.
 
             elif name == "queue_warfare":
-                strat.update(book, trades)
-                self.strategy_pnl[name] += np.random.normal(3, 2)
+                cancel_ids = strat.update(book, trades)
+                if cancel_ids:
+                    self.signals_log.append((name, f"{len(cancel_ids)} cancel(s)"))
+                # update() returns cancel-order ids, not a directional signal
+                # there is nothing to mark PnL against. No PnL fabricated.
 
             elif name == "funding_arb":
                 snapshot = FundingSnapshot(
@@ -140,21 +211,91 @@ class CentralRunner:
                     timestamp=time.time(),
                 )
                 strat.update_funding(snapshot, trades)
+                # evaluate_entry/evaluate_exit/close_position already existed and
+                # already compute real funding+perp+spot PnL they were just never
+                # called from the runner. Wiring them in the same order the
+                # module's own simulate_funding_arb() demo uses.
+                entry_signal = strat.evaluate_entry(snapshot)
+                if entry_signal:
+                    self.signals_log.append((name, entry_signal))
+                exit_reason = strat.evaluate_exit(snapshot)
+                if exit_reason:
+                    pnl_summary = strat.close_position(snapshot, exit_reason)
+                    self.strategy_pnl[name] += pnl_summary.get("total_pnl", 0.0)
 
             elif name == "liq_frontrun":
                 actions = strat.update(book, trades, self.oi)
                 if actions.get("taker_entry"):
-                    self.strategy_pnl[name] += np.random.normal(18, 6)
+                    self.signals_log.append((name, actions["taker_entry"]))
+                # total_pnl was already tracked internally (self._trade_log in
+                # liquidation_frontrun.py) and ignored by the runner in favor of
+                # np.random.normal(18, 6). Reading the real property instead.
+                self.strategy_pnl[name] = strat.total_pnl
 
             elif name == "adaptive_guerrilla":
-                strat.update(book, trades)
+                orders, cancels = strat.update(book, trades)
+                if orders:
+                    regime = self._infer_regime()
+                    vol    = self._current_volatility()
+                    approved = self.risk_manager.pre_flight_check(
+                        strategy_name=name,
+                        proposed_orders=orders,
+                        current_inventory=strat.inventory,
+                        current_volatility=vol,
+                        market_regime=regime,
+                    )
+                    if len(approved) < len(orders):
+                        logger.info(
+                            "RISK: %d/%d guerrilla orders passed pre-flight "
+                            "(regime=%s vol=%.6f)",
+                            len(approved), len(orders), regime.name, vol,
+                        )
+                    # NOTE: adaptive_guerrilla._generate_quotes() already commits
+                    # accepted quotes into its own internal _active_quotes before
+                    # returning them, which is what its passive-fill simulation
+                    # reads from. So pre_flight_check here is a real pre-trade
+                    # gate (fat-finger/price-deviation/position-cap checks run
+                    # and get logged/audited every tick) but a shave or reject
+                    # does NOT yet retract the quote from the strategy's internal
+                    # fill simulation that would require adaptive_guerrilla.py
+                    # itself to accept externally-approved sizes instead of
+                    # generating and self-committing them. Left alone rather
+                    # than reaching into its private state from here.
                 if hasattr(strat, "inventory"):
                     self.strategy_pnl[name] = strat.inventory.realized_pnl
 
             self.results[name].append(self.strategy_pnl[name] - pnl_before)
 
+    def _current_volatility(self) -> float:
+        """Realized vol from the runner's own mid-price history, via init.py's
+        existing compute_realized_volatility() previously never called anywhere
+        in the repo despite being written for exactly this purpose."""
+        if len(self._mid_history) < 20:
+            return 0.0
+        window = np.array(self._mid_history[-100:])
+        return compute_realized_volatility(window)
+
+    def _infer_regime(self) -> MarketRegime:
+        """Maps FlowToxicityClassifier's regime string (SAFE/CAUTION/TOXIC/
+        EXTREME_TOXICITY) onto CentralRiskManager's MarketRegime enum.
+        No classifier for TRENDING vs MEAN_REVERT vs ILLIQUID exists anywhere
+        in this repo today tick_by_tick_backtester.py hardcodes
+        MarketRegime.TRENDING wherever it calls pre_flight_check, and this
+        does the same as the default. Only the TOXIC branch is grounded in
+        real signal (VPINCalculator's existing, already-calibrated thresholds)."""
+        regime_str = self._last_toxicity_state.get("regime", "SAFE")
+        if regime_str in ("TOXIC", "EXTREME_TOXICITY"):
+            return MarketRegime.TOXIC
+        return MarketRegime.TRENDING
+
     def _print_progress(self, tick: int) -> None:
         print(f"[TICK {tick:4d}] MID={self.mid:,.0f} | Signals={len(self.signals_log)}")
+
+    # Strategies whose PnL is derived from a real fill/execution model.
+    # The rest generate Signal/action objects with no sizing or exit logic
+    # attached (see comments in _process_tick) their 0.00 means "not modeled
+    # yet", not "modeled and flat".
+    _PNL_TRACKED = {"adaptive_guerrilla", "liq_frontrun", "funding_arb"}
 
     def _print_final_results(self) -> None:
         print(f"\n{'='*80}\nFINAL RESULTS\n{'='*80}")
@@ -169,9 +310,16 @@ class CentralRunner:
             cum       = np.cumsum(pnls)
             drawdown  = float(np.max(np.maximum.accumulate(cum) - cum))
             signals   = sum(1 for s in self.signals_log if s[0] == name)
-            print(f"{name:<22} {total_pnl:12.2f} {avg_pnl:10.3f} {drawdown:12.2f} {signals:8d}")
+            marker    = "" if name in self._PNL_TRACKED else " *"
+            print(f"{name:<22} {total_pnl:12.2f}{marker:<2}{avg_pnl:10.3f} {drawdown:12.2f} {signals:8d}")
 
-        print("\n✅ Done.")
+        untracked = sorted(n for n in self.strategies if n not in self._PNL_TRACKED)
+        if untracked:
+            print(f"\n* No fill/sizing model yet — PnL not modeled (0.00 != flat): {', '.join(untracked)}")
+        print(f"\n halted={self.risk_manager.is_halted}"
+              f" | session_pnl={self.risk_manager.session_pnl:.2f}"
+              f" | drawdown={self.risk_manager.drawdown:.2f}")
+        print("\n Done.")
 
 
 def main() -> None:
