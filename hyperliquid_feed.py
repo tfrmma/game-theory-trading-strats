@@ -80,17 +80,40 @@ class HyperliquidFeed:
     # Parsers 
 
     def _parse_l2book(self, data: Dict) -> Optional[OrderBook]:
+        # WsBook schema (official docs): { coin, levels: [WsLevel[], WsLevel[]], time }
+        # WsLevel: { px, sz, n }. There is no "ts" field that was silently
+        # falling back to 0 every message. "n" (order count at the level) was
+        # being discarded and hardcoded to 1, even though BookLevel.order_count
+        # exists specifically to carry it (used by queue_warfare.py's alpha
+        # cancellation model).
         try:
             levels           = data.get("levels", [[], []])
             bids_raw, asks_raw = levels[0], levels[1]
-            bids = [BookLevel(price=float(l["px"]), size=float(l["sz"]), order_count=1) for l in bids_raw[:20]]
-            asks = [BookLevel(price=float(l["px"]), size=float(l["sz"]), order_count=1) for l in asks_raw[:20]]
-            return OrderBook(bids=bids, asks=asks, timestamp=time.time(), sequence_id=int(data.get("ts", 0)))
+            bids = [
+                BookLevel(price=float(l["px"]), size=float(l["sz"]), order_count=int(l.get("n", 1)))
+                for l in bids_raw[:20]
+            ]
+            asks = [
+                BookLevel(price=float(l["px"]), size=float(l["sz"]), order_count=int(l.get("n", 1)))
+                for l in asks_raw[:20]
+            ]
+            return OrderBook(bids=bids, asks=asks, timestamp=time.time(), sequence_id=int(data.get("time", 0)))
         except Exception as e:
             logger.error("l2Book parse error: %s", e)
             return None
 
     def _parse_trades(self, data: List[Dict]) -> List[Trade]:
+        # WsTrade schema (official docs): { coin, side, px, sz, hash, time, tid, users }
+        # No "ts" field (was silently falling back to time.time() local receipt
+        # time, not exchange trade time — on every single trade) and no "liq"
+        # field: the public trades feed carries no per-trade liquidation flag.
+        # Liquidation info only exists on WsUserEvent/WsUserNonFundingLedgerUpdates,
+        # which are per-user authenticated streams, not public market data.
+        # is_liquidation is left False here rather than reading a field that
+        # never exists in this payload. (Note: liquidation_frontrun.py's
+        # CascadeDetector doesn't actually key off is_liquidation it infers
+        # cascades from volume spike + OI drop so this doesn't silently break
+        # that strategy, but the field was dead/misleading as written.)
         trades = []
         for t in data:
             try:
@@ -98,8 +121,8 @@ class HyperliquidFeed:
                     price=float(t["px"]),
                     size=float(t["sz"]),
                     side=Side.BUY if t.get("side") == "B" else Side.SELL,
-                    timestamp=float(t.get("ts", time.time())),
-                    is_liquidation=bool(t.get("liq", False)),
+                    timestamp=float(t.get("time", time.time())) / 1000.0,
+                    is_liquidation=False,
                     trade_id=str(t.get("tid")),
                 ))
             except Exception:
