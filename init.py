@@ -137,10 +137,18 @@ class InventoryState:
     adverse_selection_cost: float = 0.0
     funding_pnl: float = 0.0
     trade_count: int = 0
+    last_mark_price: float = 0.0
 
     @property
     def unrealized_pnl(self) -> float:
-        return 0.0
+        """Mark-to-market on the open position, as of the mark_price seen at
+        the last fill (update_on_fill already received mark_price — it was
+        only used for adverse_selection_cost and then discarded). This is
+        NOT continuously live: InventoryState has no independent feed of
+        book updates between fills, only what update_on_fill passes it."""
+        if self.net_position == 0 or self.last_mark_price == 0.0:
+            return 0.0
+        return self.net_position * (self.last_mark_price - self.avg_entry_price)
 
     def update_on_fill(
         self,
@@ -167,6 +175,7 @@ class InventoryState:
 
         self.net_position += signed_size
         self.trade_count += 1
+        self.last_mark_price = mark_price
 
         if is_maker:
             self.adverse_selection_cost += abs(fill_price - mark_price) * size
