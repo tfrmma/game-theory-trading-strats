@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class HyperliquidFeed:
-    """Live WebSocket feed — converts raw Hyperliquid data to internal types."""
+    """Live WebSocket feed converts raw Hyperliquid data to internal types."""
 
     def __init__(self, coin: str = "BTC", testnet: bool = False) -> None:
         self.coin    = coin.upper()
@@ -29,27 +29,69 @@ class HyperliquidFeed:
         self._loop:   Optional[asyncio.AbstractEventLoop] = None
         self._running = False
 
+        # Reconnection: official docs say "all automated users should handle
+        # disconnects from the server side and gracefully reconnect" the SDK
+        # gives no on-disconnect callback, so staleness (no message in
+        # STALE_S seconds) is the signal. l2Book sends a snapshot + deltas
+        # continuously on any active market, so silence this long means the
+        # connection is dead, not that the market is quiet.
+        self._STALE_S        = 30.0
+        self._MAX_BACKOFF_S  = 60.0
+        self._last_msg_ts    = time.time()
+        self._reconnect_task: Optional[asyncio.Task] = None
+
+    def get_funding_ctx(self) -> Optional[Dict[str, float]]:
+        """REST snapshot of this coin's current funding rate/mark/oracle/OI, via
+        the official SDK's Info.meta_and_asset_ctxs() (POST /info, type
+        metaAndAssetCtxs) self.info already exists for this, it just wasn't
+        being called. Hyperliquid settles funding hourly and the rate is
+        recomputed continuously from a 5s-sampled premium average (per docs),
+        so this is a REST poll meant to be called periodically (e.g. once a
+        minute), not per-tick it is not a WebSocket push.
+        """
+        try:
+            meta, asset_ctxs = self.info.meta_and_asset_ctxs()
+            for asset, ctx in zip(meta["universe"], asset_ctxs):
+                if asset["name"] == self.coin:
+                    return {
+                        "rate":           float(ctx["funding"]),
+                        "mark_price":     float(ctx["markPx"]),
+                        "oracle_price":   float(ctx["oraclePx"]),
+                        "open_interest":  float(ctx["openInterest"]),
+                    }
+            logger.warning("get_funding_ctx: %s not found in universe", self.coin)
+            return None
+        except Exception as e:
+            logger.error("get_funding_ctx error: %s", e)
+            return None
+
     async def start(self, book_handler: Callable, trade_handler: Callable) -> None:
         self._book_handler  = book_handler
         self._trade_handler = trade_handler
         self._loop          = asyncio.get_running_loop()
         self._running       = True
 
-        self.info.subscribe({"type": "l2Book", "coin": self.coin}, self._on_book_raw)
-        self.info.subscribe({"type": "trades",  "coin": self.coin}, self._on_trade_raw)
+        self._subscribe()
 
         logger.info("Hyperliquid LIVE → %s (testnet=%s)", self.coin, self.testnet)
 
         asyncio.create_task(self._book_consumer())
         asyncio.create_task(self._trade_consumer())
+        self._reconnect_task = asyncio.create_task(self._reconnect_watchdog())
+
+    def _subscribe(self) -> None:
+        self.info.subscribe({"type": "l2Book", "coin": self.coin}, self._on_book_raw)
+        self.info.subscribe({"type": "trades",  "coin": self.coin}, self._on_trade_raw)
 
     #  SDK callbacks (background thread) 
 
     def _on_book_raw(self, data: Dict[str, Any]) -> None:
+        self._last_msg_ts = time.time()
         if data.get("channel") == "l2Book" and data.get("data") and self._loop:
             self._loop.call_soon_threadsafe(self._book_queue.put_nowait, data["data"])
 
     def _on_trade_raw(self, data: Dict[str, Any]) -> None:
+        self._last_msg_ts = time.time()
         if data.get("channel") == "trades" and data.get("data") and self._loop:
             self._loop.call_soon_threadsafe(self._trade_queue.put_nowait, data["data"])
 
@@ -105,7 +147,7 @@ class HyperliquidFeed:
     def _parse_trades(self, data: List[Dict]) -> List[Trade]:
         # WsTrade schema (official docs): { coin, side, px, sz, hash, time, tid, users }
         # No "ts" field (was silently falling back to time.time() local receipt
-        # time, not exchange trade time — on every single trade) and no "liq"
+        # time, not exchange trade time on every single trade) and no "liq"
         # field: the public trades feed carries no per-trade liquidation flag.
         # Liquidation info only exists on WsUserEvent/WsUserNonFundingLedgerUpdates,
         # which are per-user authenticated streams, not public market data.
@@ -131,4 +173,37 @@ class HyperliquidFeed:
 
     async def stop(self) -> None:
         self._running = False
+        if self._reconnect_task:
+            self._reconnect_task.cancel()
         logger.info("Hyperliquid feed stopped.")
+
+    async def _reconnect_watchdog(self) -> None:
+        """No message (book or trade) for _STALE_S seconds -> assume the
+        connection is dead and reconnect. Backoff doubles each consecutive
+        failed attempt, capped at _MAX_BACKOFF_S, and resets to 1s once a
+        message is received again."""
+        backoff = 1.0
+        while self._running:
+            await asyncio.sleep(5.0)
+            if not self._running:
+                return
+            idle = time.time() - self._last_msg_ts
+            if idle <= self._STALE_S:
+                backoff = 1.0
+                continue
+
+            logger.warning(
+                "Hyperliquid feed stale (%.0fs since last message) reconnecting (backoff=%.0fs)",
+                idle, backoff,
+            )
+            try:
+                api_url   = constants.TESTNET_API_URL if self.testnet else constants.MAINNET_API_URL
+                self.info = Info(api_url, skip_ws=False)
+                self._subscribe()
+                self._last_msg_ts = time.time()
+                logger.info("Hyperliquid feed reconnected → %s", self.coin)
+                backoff = 1.0
+            except Exception as e:
+                logger.error("Reconnect attempt failed: %s", e)
+                await asyncio.sleep(backoff)
+                backoff = min(backoff * 2, self._MAX_BACKOFF_S)
