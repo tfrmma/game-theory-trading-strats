@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import Deque, Dict, List, Optional, Tuple
 import numpy as np
 from scipy.stats import poisson
+
+from hot_paths import compute_ofi
 from init import BookLevel, OrderBook, Trade, Side, simulate_order_book, simulate_trade_tape
 
 logger = logging.getLogger(__name__)
@@ -82,7 +84,7 @@ class IcebergDetector:
 class LevelCancellationTracker:
     """
     Estimates the per-level cancellation ratio alpha = cancelled_vol / (cancelled_vol + traded_vol).
-    On each tick we compute the size that disappeared from a level without a matching trade —
+    On each tick we compute the size that disappeared from a level without a matching trade
     that delta is pure cancellation. Rolling alpha tells us how fast the queue drains ahead of us
     from cancellations alone, which the naive Poisson fill model completely misses.
     Adjusted effective queue ahead:
@@ -108,7 +110,7 @@ class LevelCancellationTracker:
 
         for price, prev_size in self._prev_sizes.items():
             if price not in current_sizes:
-                # Level vanished entirely — all remaining size was cancelled
+                # Level vanished entirely all remaining size was cancelled
                 cancelled = prev_size - trade_by_price.get(price, 0.0)
             else:
                 size_drop = prev_size - current_sizes[price]
@@ -244,7 +246,7 @@ class QueueWarfareStrategy:
         self.iceberg_det.update(book, trades)
         self.cancel_tracker.update(book, trades)
 
-        ofi = sum(t.signed_size for t in trades)
+        ofi = compute_ofi(np.array([t.signed_size for t in trades], dtype=np.float64)) if trades else 0.0
         self._ofi_history.append(ofi)
         recent_ofi = float(np.sum(self._ofi_history))
 
@@ -331,7 +333,7 @@ def simulate_queue_warfare(n_ticks: int = 200, mid: float = 50_000.0) -> None:
                 our_order.price, max(0, our_order.estimated_ahead_of_us)
             )
             p_fill = strategy.fill_model.fill_probability(eff_ahead, 10.0)
-            ofi = sum(t.signed_size for t in trades)
+            ofi = compute_ofi(np.array([t.signed_size for t in trades], dtype=np.float64)) if trades else 0.0
             print(
                 f"[Tick {i:3d}] mid={mid:.1f} | p_fill={p_fill:.3f} | alpha={alpha:.2f} | "
                 f"consumed={our_order.consumed_since_join:.2f} | eff_ahead={eff_ahead:.2f} | "
