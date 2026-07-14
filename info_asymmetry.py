@@ -9,6 +9,7 @@ from typing import Deque, List, Optional
 import numpy as np
 
 from init import Trade, OrderBook, Side, Signal, SignalStrength, simulate_order_book, simulate_trade_tape
+from hot_paths import compute_ofi
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +31,7 @@ class VPINCalculator:
     """
     Volume-synchronized PIN (Easley, Lopez de Prado & O'Hara 2012).
     VPIN ∈ [0,1]: average order imbalance across equal-volume buckets.
-    Leads adverse price moves — spikes before the damage lands.
+    Leads adverse price moves spikes before the damage lands.
     """
 
     REGIME_THRESHOLDS = [(0.20, "SAFE"), (0.40, "CAUTION"), (0.60, "TOXIC")]
@@ -247,7 +248,7 @@ class FlowToxicityClassifier:
 
         vpin = self.vpin_calc.update(trades)
 
-        ofi = sum(t.signed_size for t in trades)
+        ofi = compute_ofi(np.array([t.signed_size for t in trades], dtype=np.float64)) if trades else 0.0
         self._ofi_window.append(ofi)
         self._cumulative_ofi += ofi
 
