@@ -1,5 +1,5 @@
 """
-Central runner - simulation and live Hyperliquid modes.
+Central runner simulation and live Hyperliquid modes.
 """
 from __future__ import annotations
 
@@ -114,19 +114,36 @@ class CentralRunner:
             self._last_toxicity_state = self.toxicity.update(book, trades)
             self.risk_manager.update_market_state(book.mid)
 
-            realized_pnl = sum(self.strategy_pnl.values())
-            alive = self.risk_manager.update_global_pnl(realized_pnl, 0.0)
+            realized_pnl   = sum(self.strategy_pnl.values())
+            unrealized_pnl = sum(
+                s.inventory.unrealized_pnl for s in self.strategies.values() if hasattr(s, "inventory")
+            )
+            alive = self.risk_manager.update_global_pnl(realized_pnl, unrealized_pnl)
             if not alive:
                 logger.critical("RISK HALTED (live): %s", self.risk_manager.halt_reason)
                 return
 
             for name, strat in self.strategies.items():
-                if name == "predatory_liquidity":
+                if name == "spoof_counter":
+                    for ev in self.detector.update(book):
+                        signal = strat.process_spoof_event(ev)
+                        if signal:
+                            self.signals_log.append((name, signal))
+
+                elif name == "predatory_liquidity":
                     signal = strat.update(book, trades)
                     if signal:
                         self.signals_log.append((name, signal))
+
                 elif name == "queue_warfare":
                     strat.update(book, trades)
+
+                elif name == "liq_frontrun":
+                    actions = strat.update(book, trades, self.oi)
+                    if actions.get("taker_entry"):
+                        self.signals_log.append((name, actions["taker_entry"]))
+                    self.strategy_pnl[name] = strat.total_pnl
+
                 elif name == "adaptive_guerrilla":
                     orders, cancels = strat.update(book, trades)
                     if orders:
@@ -144,8 +161,39 @@ class CentralRunner:
                                 "RISK (live): %d/%d guerrilla orders passed pre-flight",
                                 len(approved), len(orders),
                             )
+                        self._reconcile_rejected_quotes(strat, orders, approved)
+                    if hasattr(strat, "inventory"):
+                        self.strategy_pnl[name] = strat.inventory.realized_pnl
+
+        async def funding_poller() -> None:
+            # Hyperliquid funding settles hourly (docs) polling once a minute
+            # is far more than enough resolution and stays well inside rate limits.
+            strat = self.strategies["funding_arb"]
+            while True:
+                ctx = self.feed.get_funding_ctx()
+                if ctx is not None:
+                    now = time.time()
+                    next_hour_ts = (now // 3600 + 1) * 3600  # top of next UTC hour
+                    snapshot = FundingSnapshot(
+                        rate=ctx["rate"],
+                        next_funding_ts=next_hour_ts,
+                        open_interest=ctx["open_interest"],
+                        mark_price=ctx["mark_price"],
+                        index_price=ctx["oracle_price"],
+                        timestamp=now,
+                    )
+                    strat.update_funding(snapshot, [])
+                    entry_signal = strat.evaluate_entry(snapshot)
+                    if entry_signal:
+                        self.signals_log.append(("funding_arb", entry_signal))
+                    exit_reason = strat.evaluate_exit(snapshot)
+                    if exit_reason:
+                        pnl_summary = strat.close_position(snapshot, exit_reason)
+                        self.strategy_pnl["funding_arb"] += pnl_summary.get("total_pnl", 0.0)
+                await asyncio.sleep(60.0)
 
         await self.feed.start(book_handler, trade_handler)
+        poller_task = asyncio.create_task(funding_poller())
 
         try:
             tick = 0
@@ -155,7 +203,30 @@ class CentralRunner:
                     self._print_progress(tick)
                 tick += 1
         except asyncio.CancelledError:
+            poller_task.cancel()
             await self.feed.stop()
+
+    @staticmethod
+    def _reconcile_rejected_quotes(strat, proposed, approved) -> None:
+        """When pre_flight_check shaves/rejects a guerrilla order, retract the
+        matching quote from the strategy's own _active_quotes/_cancel_log so its
+        internal fill simulation doesn't act on size the risk manager didn't
+        approve. ExecutionOrder and GuerrillaQuote don't share an id (they're
+        built side by side in _generate_quotes with independent ids), so this
+        matches on (side, price) the only fields the two objects share.
+        Uses the strategy's own existing cancellation pattern (_cancel_log +
+        del _active_quotes[qid]), the same one it already uses for TOXIC_FLOW
+        cancels not a new mechanism."""
+        if len(approved) >= len(proposed):
+            return
+        approved_keys = {(o.side, round(o.price, 1)) for o in approved}
+        rejected = [o for o in proposed if (o.side, round(o.price, 1)) not in approved_keys]
+        for order in rejected:
+            for qid, quote in list(strat._active_quotes.items()):
+                if quote.side == order.side and round(quote.price, 1) == round(order.price, 1):
+                    strat._cancel_log.append({"id": qid, "reason": "RISK_REJECTED"})
+                    del strat._active_quotes[qid]
+                    break
 
     def _process_tick(self, book: OrderBook, trades: List[Trade], tick: int) -> None:
         self._mid_history.append(book.mid)
@@ -165,11 +236,14 @@ class CentralRunner:
 
         # --- Central risk manager: global circuit breaker, evaluated every tick ---
         self.risk_manager.update_market_state(book.mid)
-        realized_pnl = sum(self.strategy_pnl.values())
-        # unrealized is hardcoded to 0.0: InventoryState.unrealized_pnl (init.py)
-        # is a stub that always returns 0.0 regardless of mark price. Flagged
-        # separately not fixed here since it's outside the scope of this pass.
-        alive = self.risk_manager.update_global_pnl(realized_pnl, 0.0)
+        realized_pnl   = sum(self.strategy_pnl.values())
+        # InventoryState.unrealized_pnl now does real mark-to-market (init.py)
+        # only adaptive_guerrilla carries one today. Reflects the mark price as
+        # of that strategy's last fill, not a continuously live mark.
+        unrealized_pnl = sum(
+            s.inventory.unrealized_pnl for s in self.strategies.values() if hasattr(s, "inventory")
+        )
+        alive = self.risk_manager.update_global_pnl(realized_pnl, unrealized_pnl)
         if not alive:
             if tick % 50 == 0:
                 print(f"[TICK {tick:4d}] \U0001F6D1 RISK HALTED: {self.risk_manager.halt_reason}")
@@ -198,16 +272,22 @@ class CentralRunner:
                 cancel_ids = strat.update(book, trades)
                 if cancel_ids:
                     self.signals_log.append((name, f"{len(cancel_ids)} cancel(s)"))
-                # update() returns cancel-order ids, not a directional signal
+                # update() returns cancel-order ids, not a directional signal —
                 # there is nothing to mark PnL against. No PnL fabricated.
 
             elif name == "funding_arb":
+                # Rate magnitude matches funding_arbitrage.py's own
+                # simulate_funding_arb() demo (base_rate=0.0008) rather than
+                # the previous 0.0000125-0.000075, which sat an order of
+                # magnitude below EXTREME_FUNDING_THRESHOLD (0.0005) and could
+                # never actually trigger evaluate_entry().
+                rate_decay = 1 - min(tick / self.n_ticks, 1.0) * 0.6
                 snapshot = FundingSnapshot(
-                    rate=0.000075 if tick > 200 else 0.0000125,  # 1h rates 
+                    rate=0.0008 * rate_decay,
                     next_funding_ts=time.time() + 3600,
                     open_interest=self.oi,
                     mark_price=self.mid,
-                    index_price=self.mid * 0.999,
+                    index_price=self.mid * 0.998,
                     timestamp=time.time(),
                 )
                 strat.update_funding(snapshot, trades)
@@ -250,17 +330,13 @@ class CentralRunner:
                             "(regime=%s vol=%.6f)",
                             len(approved), len(orders), regime.name, vol,
                         )
-                    # NOTE: adaptive_guerrilla._generate_quotes() already commits
-                    # accepted quotes into its own internal _active_quotes before
-                    # returning them, which is what its passive-fill simulation
-                    # reads from. So pre_flight_check here is a real pre-trade
-                    # gate (fat-finger/price-deviation/position-cap checks run
-                    # and get logged/audited every tick) but a shave or reject
-                    # does NOT yet retract the quote from the strategy's internal
-                    # fill simulation that would require adaptive_guerrilla.py
-                    # itself to accept externally-approved sizes instead of
-                    # generating and self-committing them. Left alone rather
-                    # than reaching into its private state from here.
+                    # adaptive_guerrilla._generate_quotes() commits accepted
+                    # quotes into its own internal _active_quotes before
+                    # returning them (that's what its passive-fill simulation
+                    # reads from). A pre_flight_check reject/shave now retracts
+                    # the matching quote via the strategy's own existing
+                    # cancellation pattern see _reconcile_rejected_quotes.
+                    self._reconcile_rejected_quotes(strat, orders, approved)
                 if hasattr(strat, "inventory"):
                     self.strategy_pnl[name] = strat.inventory.realized_pnl
 
@@ -315,11 +391,11 @@ class CentralRunner:
 
         untracked = sorted(n for n in self.strategies if n not in self._PNL_TRACKED)
         if untracked:
-            print(f"\n* No fill/sizing model yet — PnL not modeled (0.00 != flat): {', '.join(untracked)}")
-        print(f"\n halted={self.risk_manager.is_halted}"
+            print(f"\n* No fill/sizing model yet PnL not modeled (0.00 != flat): {', '.join(untracked)}")
+        print(f"\n🛑 halted={self.risk_manager.is_halted}"
               f" | session_pnl={self.risk_manager.session_pnl:.2f}"
               f" | drawdown={self.risk_manager.drawdown:.2f}")
-        print("\n Done.")
+        print("\n✅ Done.")
 
 
 def main() -> None:
