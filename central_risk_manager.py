@@ -32,7 +32,7 @@ class RiskConfig:
     max_single_order_fraction: float = 0.25 # order.size ≤ max_net_position × this
     max_price_deviation_pct: float = 0.02   # reject if price deviates > 2% from last mid
 
-    # Asset lot-size constraints (venue-specific — query from exchange meta on startup)
+    # Asset lot-size constraints (venue-specific query from exchange meta on startup)
     size_decimals: int = 4                  # BTC perp on Hyperliquid = 4 (step = 0.0001)
     event_log_maxlen: int = 2_000           # rolling audit deque cap
 
@@ -156,7 +156,7 @@ class CentralRiskManager:
                     f"mid={self._last_mid:.2f}"
                 )
                 logger.warning(
-                    "FAT FINGER [%s]: price %.2f deviates %.1f%% from mid %.2f — discarded",
+                    "FAT FINGER [%s]: price %.2f deviates %.1f%% from mid %.2f discarded",
                     strategy_name, order.price, dev * 100.0, self._last_mid,
                 )
                 return None
@@ -167,7 +167,7 @@ class CentralRiskManager:
                 f"{order.side.value} blocked, cooldown_remaining={remaining:.1f}s"
             )
             logger.info(
-                "COOLDOWN [%s]: blocking %s — not a reduce, %.1fs remaining",
+                "COOLDOWN [%s]: blocking %s not a reduce, %.1fs remaining",
                 strategy_name, order.side.value, remaining,
             )
             return None
@@ -305,7 +305,9 @@ class CentralRiskManager:
 
     def recent_events(self, n: int = 20) -> List[RiskEvent]:
         """Last N audit events, newest first."""
-        return list(reversed(self._event_log[-n:]))
+        # collections.deque doesn't support slice indexing (unlike list)
+        # self._event_log[-n:] raised TypeError on every call. Convert first.
+        return list(reversed(list(self._event_log)[-n:]))
 
     def reset_session(self) -> None:
         self._session_pnl      = 0.0
