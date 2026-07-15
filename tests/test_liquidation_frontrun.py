@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from liquidation_frontrun import CascadeDetector, LiquidationFrontrunStrategy
-from init import Trade, Side
+from strategies.liquidation_frontrun import CascadeDetector, LiquidationFrontrunStrategy
+from engine.init import Trade, Side
 
 
 def make_trade(price=100.0, size=1.0, side=Side.BUY) -> Trade:

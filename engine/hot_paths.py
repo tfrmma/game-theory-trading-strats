@@ -6,7 +6,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 try:
-    from _hot_paths import (
+    from engine._hot_paths import (
         book_imbalance,
         compute_ofi,
         realized_vol,
@@ -17,7 +17,7 @@ try:
     )
     _BACKEND = "cython"
 except ImportError:
-    from _hot_paths_pure import (  # type: ignore[no-redef]
+    from engine._hot_paths_pure import (  # type: ignore[no-redef]
         book_imbalance,
         compute_ofi,
         realized_vol,

@@ -8,8 +8,8 @@ from typing import Deque, List, Optional
 
 import numpy as np
 
-from init import Trade, OrderBook, Side, Signal, SignalStrength, simulate_order_book, simulate_trade_tape
-from hot_paths import compute_ofi
+from engine.init import Trade, OrderBook, Side, Signal, SignalStrength, simulate_order_book, simulate_trade_tape
+from engine.hot_paths import compute_ofi
 
 logger = logging.getLogger(__name__)
 

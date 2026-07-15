@@ -8,7 +8,7 @@ from typing import Deque, List, Optional, Tuple
 
 import numpy as np
 
-from init import FundingSnapshot, Trade, OrderBook, Side, Signal, SignalStrength, simulate_order_book, simulate_trade_tape
+from engine.init import FundingSnapshot, Trade, OrderBook, Side, Signal, SignalStrength, simulate_order_book, simulate_trade_tape
 
 logger = logging.getLogger(__name__)
 

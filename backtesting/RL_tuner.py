@@ -7,10 +7,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from init import OrderBook, Trade, Side, InventoryState
-from adaptive_guerrilla import AdaptiveGuerrillaStrategy
-from info_asymmetry import FlowToxicityClassifier
-from tick_by_tick_backtester import TickLoader, HistoricalTick
+from engine.init import OrderBook, Trade, Side, InventoryState
+from strategies.adaptive_guerrilla import AdaptiveGuerrillaStrategy
+from strategies.info_asymmetry import FlowToxicityClassifier
+from backtesting.tick_by_tick_backtester import TickLoader, HistoricalTick
 
 logger = logging.getLogger(__name__)
 
@@ -452,7 +452,7 @@ def demo_pipeline(n_ticks: int = 200) -> None:
     print(f"sb3 available:  {_SB3}")
     if not _GYM:
         print("\nTo train: pip install gymnasium stable-baselines3")
-        print("Then:     from rl_param_tuner import train_agent, TrainConfig")
+        print("Then:     from backtesting.RL_tuner import train_agent, TrainConfig")
         print("          agent = train_agent(TrainConfig(algorithm='SAC'))")
     print("="*60 + "\n")
 

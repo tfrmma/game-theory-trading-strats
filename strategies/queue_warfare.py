@@ -8,8 +8,8 @@ from typing import Deque, Dict, List, Optional, Tuple
 import numpy as np
 from scipy.stats import poisson
 
-from hot_paths import compute_ofi
-from init import BookLevel, OrderBook, Trade, Side, simulate_order_book, simulate_trade_tape
+from engine.hot_paths import compute_ofi
+from engine.init import BookLevel, OrderBook, Trade, Side, simulate_order_book, simulate_trade_tape
 
 logger = logging.getLogger(__name__)
 

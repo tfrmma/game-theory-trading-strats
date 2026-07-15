@@ -18,14 +18,14 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from init import Side
+from engine.init import Side
 
 
 @pytest.fixture
 def feed():
-    with patch("hyperliquid_feed.Info") as MockInfo:
+    with patch("engine.hyperliquid_feed.Info") as MockInfo:
         MockInfo.return_value = MagicMock()
-        from hyperliquid_feed import HyperliquidFeed
+        from engine.hyperliquid_feed import HyperliquidFeed
         yield HyperliquidFeed("BTC")
 
 
@@ -118,7 +118,7 @@ class TestReconnectWatchdog:
         feed._last_msg_ts = time.time() - 100
         original_info = feed.info
 
-        with patch("hyperliquid_feed.Info") as MockInfo:
+        with patch("engine.hyperliquid_feed.Info") as MockInfo:
             MockInfo.return_value = MagicMock()
             task = asyncio.create_task(feed._reconnect_watchdog())
             await asyncio.sleep(6.0)
@@ -158,7 +158,7 @@ class TestReconnectWatchdog:
         feed._STALE_S = 0.0
         feed._last_msg_ts = time.time() - 100
 
-        with patch("hyperliquid_feed.Info", side_effect=ConnectionError("simulated")):
+        with patch("engine.hyperliquid_feed.Info", side_effect=ConnectionError("simulated")):
             task = asyncio.create_task(feed._reconnect_watchdog())
             await asyncio.sleep(2.0)
             feed._running = False

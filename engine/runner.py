@@ -12,19 +12,19 @@ import time
 
 import numpy as np
 
-from init import (
+from engine.init import (
     simulate_order_book, simulate_trade_tape, Side, OrderBook, Trade,
     MarketRegime, compute_realized_volatility,
 )
-from spoofing_counter import SpoofingDetector, SpoofCounterStrategy
-from predatory_liquidity import PredatoryLiquidityStrategy
-from info_asymmetry import FlowToxicityClassifier
-from queue_warfare import QueueWarfareStrategy
-from funding_arbitrage import FundingArbitrageStrategy, FundingSnapshot
-from liquidation_frontrun import LiquidationFrontrunStrategy
-from adaptive_guerrilla import AdaptiveGuerrillaStrategy
-from hyperliquid_feed import HyperliquidFeed
-from central_risk_manager import CentralRiskManager, RiskConfig
+from strategies.spoofing_counter import SpoofingDetector, SpoofCounterStrategy
+from strategies.predatory_liquidity import PredatoryLiquidityStrategy
+from strategies.info_asymmetry import FlowToxicityClassifier
+from strategies.queue_warfare import QueueWarfareStrategy
+from strategies.funding_arbitrage import FundingArbitrageStrategy, FundingSnapshot
+from strategies.liquidation_frontrun import LiquidationFrontrunStrategy
+from strategies.adaptive_guerrilla import AdaptiveGuerrillaStrategy
+from engine.hyperliquid_feed import HyperliquidFeed
+from engine.central_risk_manager import CentralRiskManager, RiskConfig
 
 logger = logging.getLogger(__name__)
 

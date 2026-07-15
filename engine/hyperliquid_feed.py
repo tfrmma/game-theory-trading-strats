@@ -8,7 +8,7 @@ import time
 from hyperliquid.utils import constants
 from hyperliquid.info import Info
 
-from init import OrderBook, BookLevel, Trade, Side
+from engine.init import OrderBook, BookLevel, Trade, Side
 
 logger = logging.getLogger(__name__)
 

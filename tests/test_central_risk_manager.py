@@ -8,8 +8,8 @@ import time
 
 import pytest
 
-from central_risk_manager import CentralRiskManager, RiskConfig
-from init import ExecutionOrder, InventoryState, MarketRegime, OrderType, Side
+from engine.central_risk_manager import CentralRiskManager, RiskConfig
+from engine.init import ExecutionOrder, InventoryState, MarketRegime, OrderType, Side
 
 
 def make_config(**overrides) -> RiskConfig:

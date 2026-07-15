@@ -11,11 +11,11 @@ import time
 
 import pytest
 
-from funding_arbitrage import (
+from strategies.funding_arbitrage import (
     EXTREME_FUNDING_THRESHOLD, FundingArbitragePosition, FundingArbitrageStrategy,
     FundingMonitor, FundingSnapshot,
 )
-from init import Side
+from engine.init import Side
 
 
 def make_snapshot(rate=0.0001, mark=50_000.0, index=50_000.0, next_funding_in=1800.0, oi=1_000_000.0):

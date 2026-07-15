@@ -8,7 +8,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from init import (
+from engine.init import (
     InventoryState, Side, simulate_order_book, simulate_trade_tape,
     compute_realized_volatility,
 )

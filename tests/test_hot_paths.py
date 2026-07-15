@@ -9,7 +9,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hot_paths import compute_ofi, backend
+from engine.hot_paths import compute_ofi, backend
 
 
 def test_backend_returns_a_known_string():

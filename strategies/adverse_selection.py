@@ -7,7 +7,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from init import Side, Trade, OrderBook
+from engine.init import Side, Trade, OrderBook
 
 logger = logging.getLogger(__name__)
 
@@ -250,7 +250,7 @@ class AdverseSelectionMonitor:
         return self.markout.report(strategy)
 
 def simulate_adverse_selection_metrics() -> None:
-    from init import simulate_order_book, simulate_trade_tape
+    from engine.init import simulate_order_book, simulate_trade_tape
     import time
 
     monitor = AdverseSelectionMonitor()

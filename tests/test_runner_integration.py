@@ -10,8 +10,8 @@ import asyncio
 import numpy as np
 import pytest
 
-import runner as runner_mod
-from init import ExecutionOrder, OrderType, Side, simulate_order_book, simulate_trade_tape
+import engine.runner as runner_mod
+from engine.init import ExecutionOrder, OrderType, Side, simulate_order_book, simulate_trade_tape
 
 
 class TestRegressions:
@@ -19,13 +19,13 @@ class TestRegressions:
         """Was: ModuleNotFoundError: No module named 'backtester' RL_tuner.py
         imported from a module that had been renamed to
         tick_by_tick_backtester.py, breaking every entry point in the file."""
-        import RL_tuner
+        import backtesting.RL_tuner as RL_tuner
         assert hasattr(RL_tuner, "train_agent")
         assert hasattr(RL_tuner, "TrainConfig")
 
     def test_readme_import_examples_actually_work(self):
-        from tick_by_tick_backtester import ProBacktestEngine, TickLoader, LatencyConfig, ProbQueueCancelModel
-        from RL_tuner import train_agent, compare_baseline, TrainConfig  # noqa: F401
+        from backtesting.tick_by_tick_backtester import ProBacktestEngine, TickLoader, LatencyConfig, ProbQueueCancelModel
+        from backtesting.RL_tuner import train_agent, compare_baseline, TrainConfig  # noqa: F401
 
 
 class TestSimulationSmokeTest:
@@ -84,7 +84,7 @@ class TestAdaptiveGuerrillaReconciliation:
         rejected_order = ExecutionOrder(side=Side.SELL, price=200.0, size=0.1,
                                          order_type=OrderType.POST_ONLY, client_id="b")
 
-        from adaptive_guerrilla import GuerrillaQuote
+        from strategies.adaptive_guerrilla import GuerrillaQuote
         kept_quote     = GuerrillaQuote(side=Side.BUY, price=100.0, size=0.1, reservation_price=100.0)
         rejected_quote = GuerrillaQuote(side=Side.SELL, price=200.0, size=0.1, reservation_price=200.0)
         strat._active_quotes = {kept_quote.order_id: kept_quote, rejected_quote.order_id: rejected_quote}
@@ -102,7 +102,7 @@ class TestAdaptiveGuerrillaReconciliation:
     def test_nothing_removed_when_everything_approved(self):
         r = runner_mod.CentralRunner(live=False, n_ticks=10)
         strat = r.strategies["adaptive_guerrilla"]
-        from adaptive_guerrilla import GuerrillaQuote
+        from strategies.adaptive_guerrilla import GuerrillaQuote
         quote = GuerrillaQuote(side=Side.BUY, price=100.0, size=0.1, reservation_price=100.0)
         strat._active_quotes = {quote.order_id: quote}
 

@@ -12,7 +12,7 @@ from typing import Callable, Deque, Dict, List, NamedTuple, Optional, Tuple
 
 import numpy as np
 
-from init import (
+from engine.init import (
     BookLevel, ExecutionOrder, InventoryState, OrderBook,
     OrderType, Side, Trade, simulate_order_book, simulate_trade_tape,
 )
@@ -587,7 +587,7 @@ class BacktestEngine:
     def _check(self, name, orders, book):
         if self.risk_manager is None:
             return orders
-        from init import MarketRegime
+        from engine.init import MarketRegime
         self.risk_manager.update_market_state(book.mid)
         return self.risk_manager.pre_flight_check(
             name, orders, self._inventory[name], 0.001, MarketRegime.TRENDING
@@ -684,7 +684,7 @@ class ProBacktestEngine:
             new_orders = _extract_orders(result)
             if self.risk_manager is not None:
                 self.risk_manager.update_market_state(stale.mid)
-                from init import MarketRegime
+                from engine.init import MarketRegime
                 new_orders = self.risk_manager.pre_flight_check(
                     name, new_orders, self._inventory[name], 0.001, MarketRegime.TRENDING
                 )
@@ -781,10 +781,10 @@ def run_synthetic_backtest(
     latency_config: Optional[LatencyConfig] = None,
     cancel_model:   Optional[object] = None,
 ) -> BacktestReport:
-    from predatory_liquidity import PredatoryLiquidityStrategy
-    from adaptive_guerrilla import AdaptiveGuerrillaStrategy
-    from liquidation_frontrun import LiquidationFrontrunStrategy
-    from central_risk_manager import CentralRiskManager, RiskConfig
+    from strategies.predatory_liquidity import PredatoryLiquidityStrategy
+    from strategies.adaptive_guerrilla import AdaptiveGuerrillaStrategy
+    from strategies.liquidation_frontrun import LiquidationFrontrunStrategy
+    from engine.central_risk_manager import CentralRiskManager, RiskConfig
 
     strategies = {
         "predatory_liq": PredatoryLiquidityStrategy(),

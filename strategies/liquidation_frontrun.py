@@ -9,7 +9,7 @@ from typing import Deque, Dict, List, Optional, Tuple
 
 import numpy as np
 
-from init import OrderBook, Trade, Side, simulate_order_book, simulate_trade_tape
+from engine.init import OrderBook, Trade, Side, simulate_order_book, simulate_trade_tape
 
 logger = logging.getLogger(__name__)
 

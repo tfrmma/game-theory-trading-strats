@@ -22,11 +22,10 @@ rl = ["gymnasium>=0.29.0", "stable-baselines3>=2.0.0"]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0"]
 
 [project.scripts]
-runner = "runner:main"
+runner = "engine.runner:main"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["*"]
+include = ["engine*", "strategies*", "backtesting*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
