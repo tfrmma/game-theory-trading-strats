@@ -7,7 +7,7 @@ Tested on Hyperliquid; adaptable to Binance Perps, dYdX, and similar venues.
 
 ## Modules
 
-### Strategies
+### Strategies (`strategies/`)
 
 | Module | Game | Edge |
 |--------|------|------|
@@ -18,22 +18,27 @@ Tested on Hyperliquid; adaptable to Binance Perps, dYdX, and similar venues.
 | `funding_arbitrage.py` | Convergence Timing Game | Pre-print funding capture, spot-perp divergence |
 | `liquidation_frontrun.py` | Dominated Strategy Exploitation | Front-run deterministic liq engines |
 | `adaptive_guerrilla.py` | Avellaneda-Stoikov + toxic flow cancel | Decaying risk horizon T-t, inventory skew, adverse selection deflection |
+| `adverse_selection.py` | — | Markout PnL, effective/realized spread decomposition, Roll estimator, Amihud ratio |
 
-### Infrastructure
+### Engine (`engine/`)
 
 | Module | Role |
 |--------|------|
 | `init.py` | Shared data structures, enums, simulation utilities |
 | `runner.py` | Central orchestrator - simulation and live Hyperliquid modes |
-| `hyperliquid_feed.py` | Live WebSocket feed with `asyncio.Queue` + `call_soon_threadsafe` |
+| `hyperliquid_feed.py` | Live WebSocket feed with `asyncio.Queue` + `call_soon_threadsafe`, REST funding polling, reconnect watchdog |
 | `central_risk_manager.py` | Pre-trade risk gate: circuit breaker, sizing shaver, fat-finger, toxicity cooldown |
-| `backtester.py` | Tick-by-tick L2 replay with FIFO queue simulation, latency modeling, and PnL attribution |
-| `adverse_selection.py` | Markout PnL, effective/realized spread decomposition, Roll estimator, Amihud ratio |
-| `rl_param_tuner.py` | SAC/PPO agent that optimizes Avellaneda-Stoikov parameters + toxic flow thresholds in real time |
 | `hot_paths.py` | Auto-selecting wrapper - Cython extension or pure Python fallback |
 | `_hot_paths.pyx` | Cython hot paths: OFI, VPIN bucket fill, Kyle's λ OLS, Poisson fill prob, lot floor |
 | `_hot_paths_pure.py` | Pure Python fallback - identical API to the compiled extension |
 | `setup_hot_paths.py` | Build script for the Cython extension |
+
+### Backtesting (`backtesting/`)
+
+| Module | Role |
+|--------|------|
+| `tick_by_tick_backtester.py` | Tick-by-tick L2 replay with FIFO queue simulation, latency modeling, and PnL attribution |
+| `RL_tuner.py` | SAC/PPO agent that optimizes Avellaneda-Stoikov parameters + toxic flow thresholds in real time |
 
 ---
 
@@ -43,10 +48,11 @@ Tested on Hyperliquid; adaptable to Binance Perps, dYdX, and similar venues.
 pip install -r requirements.txt
 
 # Optional: compile Cython hot paths (~10-100x speedup on inner loops)
-python setup_hot_paths.py build_ext --inplace
+pip install Cython>=3.0.0   # or: pip install -e ".[speed]"
+cd engine && python setup_hot_paths.py build_ext --inplace && cd ..
 
 # Optional: RL parameter tuner
-pip install gymnasium stable-baselines3
+pip install gymnasium stable-baselines3   # or: pip install -e ".[rl]"
 ```
 
 ---
@@ -55,20 +61,20 @@ pip install gymnasium stable-baselines3
 
 ```bash
 # Simulation
-python runner.py
+python -m engine.runner
 
 # Live
-python runner.py --live --coin BTC
+python -m engine.runner --live --coin BTC
 
 # Testnet
-python runner.py --live --coin BTC --testnet
+python -m engine.runner --live --coin BTC --testnet
 
 # Backtest - simple mode
-python backtester.py
+python -m backtesting.tick_by_tick_backtester
 
 # Backtest - pro mode (FIFO queue + latency)
 python -c "
-from backtester import ProBacktestEngine, TickLoader, LatencyConfig, ProbQueueCancelModel
+from backtesting.tick_by_tick_backtester import ProBacktestEngine, TickLoader, LatencyConfig, ProbQueueCancelModel
 ticks  = TickLoader.from_csv('data/btc_ticks.csv')
 engine = ProBacktestEngine(
     strategies={...},
@@ -79,11 +85,11 @@ engine.run(ticks).print_summary()
 "
 
 # RL parameter tuner - pipeline demo (no gym required)
-python rl_param_tuner.py
+python -m backtesting.RL_tuner
 
 # RL parameter tuner - train SAC agent
 python -c "
-from rl_param_tuner import train_agent, TrainConfig
+from backtesting.RL_tuner import train_agent, TrainConfig
 agent = train_agent(TrainConfig(algorithm='SAC', total_timesteps=500_000))
 agent.save('models/as_rl_agent')
 "
@@ -92,10 +98,27 @@ agent.save('models/as_rl_agent')
 Each strategy module is independently runnable:
 
 ```bash
-python spoofing_counter.py
-python funding_arbitrage.py
-python adverse_selection.py
+python -m strategies.spoofing_counter
+python -m strategies.funding_arbitrage
+python -m strategies.adverse_selection
 ```
+
+All `-m` commands run from the repo root.
+
+## Testing
+
+```bash
+pip install -e ".[dev]"
+pytest -v
+```
+
+84 tests covering `init.py` (InventoryState fill accounting + unrealized_pnl),
+`central_risk_manager.py` (circuit breaker, pre-flight fat-finger/price-deviation/
+cooldown/shave logic, regime haircuts), `hot_paths.py`, `hyperliquid_feed.py`
+(WS payload parsing against the official schema, reconnect watchdog),
+`funding_arbitrage.py` and `liquidation_frontrun.py` (PnL math), and a
+`runner.py` integration/smoke suite. Runs automatically on push/PR via
+`.github/workflows/tests.yml` across Python 3.10-3.12.
 
 ---
 
@@ -147,7 +170,7 @@ python adverse_selection.py
 
 ## RL parameter tuner
 
-`rl_param_tuner.py` trains a SAC agent to continuously optimize the Avellaneda-Stoikov parameters and toxic flow thresholds of `AdaptiveGuerrillaStrategy`. The agent does not replace the strategy - it tunes it.
+`RL_tuner.py` trains a SAC agent to continuously optimize the Avellaneda-Stoikov parameters and toxic flow thresholds of `AdaptiveGuerrillaStrategy`. The agent does not replace the strategy - it tunes it.
 
 **State (14 features):** AS model state (γ, σ, T-t), toxicity metrics (VPIN, Kyle's λ, composite score), inventory skew, cancel rate, spread bps, book imbalance, realized PnL, adverse selection cost, time to funding.
 
@@ -156,7 +179,7 @@ python adverse_selection.py
 **Reward:** ΔPnL − inventory risk penalty − adverse selection cost − drawdown penalty − toxic hold penalty.
 
 ```python
-from rl_param_tuner import train_agent, compare_baseline, TrainConfig
+from backtesting.RL_tuner import train_agent, compare_baseline, TrainConfig
 
 agent = train_agent(TrainConfig(algorithm="SAC", total_timesteps=500_000))
 compare_baseline(agent)   # prints RL-tuned vs fixed-param PnL side by side
@@ -169,7 +192,7 @@ The pipeline (observation → action → params) works without gymnasium. Only t
 ## Risk manager
 
 ```python
-from central_risk_manager import CentralRiskManager, RiskConfig
+from engine.central_risk_manager import CentralRiskManager, RiskConfig
 
 rm = CentralRiskManager(RiskConfig(
     max_net_position    = 5.0,     # BTC
